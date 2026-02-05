@@ -1,10 +1,16 @@
-import { spawn, ChildProcess } from 'child_process';
-import { readFile, unlink } from 'fs/promises';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { randomUUID } from 'crypto';
-import { Span, SpanStatusCode, context, trace, Context } from '@opentelemetry/api';
-import { getTracer } from './tracing.js';
+import { spawn, ChildProcess } from "child_process";
+import { readFile, unlink } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { randomUUID } from "crypto";
+import {
+  Span,
+  SpanStatusCode,
+  context,
+  trace,
+  Context,
+} from "@opentelemetry/api";
+import { getTracer } from "./tracing.js";
 
 export interface AmpInvokeOptions {
   /** Working directory for the amp process */
@@ -49,8 +55,8 @@ export type AmpEvent =
   | AmpResultEvent;
 
 export interface AmpSystemEvent {
-  type: 'system';
-  subtype: 'init';
+  type: "system";
+  subtype: "init";
   cwd: string;
   session_id: string;
   tools: string[];
@@ -58,9 +64,9 @@ export interface AmpSystemEvent {
 }
 
 export interface AmpUserEvent {
-  type: 'user';
+  type: "user";
   message: {
-    role: 'user';
+    role: "user";
     content: AmpContentBlock[];
   };
   parent_tool_use_id: string | null;
@@ -68,12 +74,12 @@ export interface AmpUserEvent {
 }
 
 export interface AmpAssistantEvent {
-  type: 'assistant';
+  type: "assistant";
   message: {
-    type: 'message';
-    role: 'assistant';
+    type: "message";
+    role: "assistant";
     content: AmpContentBlock[];
-    stop_reason: 'end_turn' | 'tool_use';
+    stop_reason: "end_turn" | "tool_use";
     usage: {
       input_tokens: number;
       output_tokens: number;
@@ -88,8 +94,8 @@ export interface AmpAssistantEvent {
 }
 
 export interface AmpResultEvent {
-  type: 'result';
-  subtype: 'success' | 'error';
+  type: "result";
+  subtype: "success" | "error";
   duration_ms: number;
   is_error: boolean;
   num_turns: number;
@@ -98,9 +104,19 @@ export interface AmpResultEvent {
 }
 
 export type AmpContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean };
+  | { type: "text"; text: string }
+  | {
+      type: "tool_use";
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+    }
+  | {
+      type: "tool_result";
+      tool_use_id: string;
+      content: string;
+      is_error: boolean;
+    };
 
 export interface ToolCallInfo {
   id: string;
@@ -114,14 +130,14 @@ export interface ToolCallInfo {
 
 export interface LlmCallInfo {
   index: number;
-  stopReason: 'end_turn' | 'tool_use';
+  stopReason: "end_turn" | "tool_use";
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number;
   cacheReadInputTokens: number;
   startTime: number;
   endTime: number;
-  toolCalls: string[];  // tool names called in this turn
+  toolCalls: string[]; // tool names called in this turn
 }
 
 /**
@@ -130,7 +146,7 @@ export interface LlmCallInfo {
  */
 export interface InternalLlmCall {
   model: string;
-  toolName: string;  // which tool made this call (oracle, finder, etc.)
+  toolName: string; // which tool made this call (oracle, finder, etc.)
   task?: string;
   reasoningEffort?: string;
   messageCount?: number;
@@ -155,34 +171,58 @@ interface SpawnAmpResult extends AmpResult {
  * Instrumented Amp CLI client that emits OpenTelemetry traces
  */
 export class AmpClient {
-  private readonly tracer = getTracer('amp-client');
+  private readonly tracer = getTracer("amp-client");
 
   /**
    * Invoke the Amp CLI with a prompt and collect telemetry.
    * Uses --stream-json to get structured output.
    */
-  async invoke(prompt: string, options: AmpInvokeOptions = {}): Promise<AmpResult> {
-    return this.tracer.startActiveSpan('gen_ai.capability', async (span: Span) => {
+  async invoke(
+    prompt: string,
+    options: AmpInvokeOptions = {},
+  ): Promise<AmpResult> {
+    return this.tracer.startActiveSpan("amp", async (span: Span) => {
       try {
-        span.setAttribute('gen_ai.capability.name', 'amp');
-        span.setAttribute('gen_ai.operation.name', 'chat');
-        span.setAttribute('gen_ai.input.messages', this.truncate(prompt, 4000));
-        span.setAttribute('gen_ai.provider.name', 'amp');
+        span.setAttribute("gen_ai.capability.name", "amp");
+        span.setAttribute("gen_ai.operation.name", "chat");
+        span.setAttribute("gen_ai.input.messages", this.truncate(prompt, 4000));
+        span.setAttribute("gen_ai.provider.name", "amp");
 
         const result = await this.spawnAmp(prompt, options, span);
 
-        span.setAttribute('gen_ai.conversation.id', result.sessionId ?? 'unknown');
-        span.setAttribute('gen_ai.usage.input_tokens', result.usage.inputTokens);
-        span.setAttribute('gen_ai.usage.output_tokens', result.usage.outputTokens);
-        span.setAttribute('gen_ai.usage.cache_read_tokens', result.usage.cacheReadInputTokens);
-        span.setAttribute('gen_ai.usage.cache_creation_tokens', result.usage.cacheCreationInputTokens);
-        span.setAttribute('amp.exit_code', result.exitCode);
+        span.setAttribute(
+          "gen_ai.conversation.id",
+          result.sessionId ?? "unknown",
+        );
+        span.setAttribute(
+          "gen_ai.usage.input_tokens",
+          result.usage.inputTokens,
+        );
+        span.setAttribute(
+          "gen_ai.usage.output_tokens",
+          result.usage.outputTokens,
+        );
+        span.setAttribute(
+          "gen_ai.usage.cache_read_tokens",
+          result.usage.cacheReadInputTokens,
+        );
+        span.setAttribute(
+          "gen_ai.usage.cache_creation_tokens",
+          result.usage.cacheCreationInputTokens,
+        );
+        span.setAttribute("amp.exit_code", result.exitCode);
 
         if (result.finalResult) {
-          span.setAttribute('gen_ai.output.messages', this.truncate(result.finalResult, 4000));
+          span.setAttribute(
+            "gen_ai.output.messages",
+            this.truncate(result.finalResult, 4000),
+          );
         }
 
-        if (result.exitCode !== 0 || result.events.some(e => e.type === 'result' && e.is_error)) {
+        if (
+          result.exitCode !== 0 ||
+          result.events.some((e) => e.type === "result" && e.is_error)
+        ) {
           span.setStatus({
             code: SpanStatusCode.ERROR,
             message: `Exit code ${result.exitCode}: ${this.truncate(result.stderr, 500)}`,
@@ -193,17 +233,26 @@ export class AmpClient {
 
         // BAD HACK: Parse debug logs for model name and internal LLM calls (Oracle, etc.)
         const debugInfo = await this.BAD_HACK__parseDebugLog(result.logFile);
-        const modelName = debugInfo.mainModel ?? 'claude';
+        const modelName = debugInfo.mainModel ?? "claude";
 
-        // Capture the active context while we're inside startActiveSpan
-        const parentContext = context.active();
+        // Explicitly set the span in the context to ensure proper parent-child relationship
+        const parentContext = trace.setSpan(context.active(), span);
 
         // Create child spans for each LLM call and tool call
-        this.createLlmCallSpans(result.llmCalls, result.events, modelName, parentContext);
+        this.createLlmCallSpans(
+          result.llmCalls,
+          result.events,
+          modelName,
+          parentContext,
+        );
         this.createToolCallSpans(result.toolCalls, parentContext);
 
         if (debugInfo.internalCalls.length > 0) {
-          this.BAD_HACK__createInternalLlmCallSpans(debugInfo.internalCalls, result.toolCalls, parentContext);
+          this.BAD_HACK__createInternalLlmCallSpans(
+            debugInfo.internalCalls,
+            result.toolCalls,
+            parentContext,
+          );
         }
 
         // Return without the logFile property (it's internal)
@@ -214,7 +263,9 @@ export class AmpClient {
           code: SpanStatusCode.ERROR,
           message: error instanceof Error ? error.message : String(error),
         });
-        span.recordException(error instanceof Error ? error : new Error(String(error)));
+        span.recordException(
+          error instanceof Error ? error : new Error(String(error)),
+        );
         throw error;
       } finally {
         span.end();
@@ -222,10 +273,16 @@ export class AmpClient {
     });
   }
 
-  private createLlmCallSpans(llmCalls: LlmCallInfo[], events: AmpEvent[], modelName: string, parentContext: Context): void {
-
+  private createLlmCallSpans(
+    llmCalls: LlmCallInfo[],
+    events: AmpEvent[],
+    modelName: string,
+    parentContext: Context,
+  ): void {
     // Extract assistant events to get prompts and completions
-    const assistantEvents = events.filter((e): e is AmpAssistantEvent => e.type === 'assistant');
+    const assistantEvents = events.filter(
+      (e): e is AmpAssistantEvent => e.type === "assistant",
+    );
 
     for (let i = 0; i < llmCalls.length; i++) {
       const llm = llmCalls[i];
@@ -234,24 +291,34 @@ export class AmpClient {
       const llmSpan = this.tracer.startSpan(
         `chat ${modelName}`,
         { startTime: llm.startTime },
-        parentContext
+        parentContext,
       );
-      llmSpan.setAttribute('gen_ai.operation.name', 'chat');
-      llmSpan.setAttribute('gen_ai.step.index', llm.index);
-      llmSpan.setAttribute('gen_ai.request.model', modelName);
-      llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
-      llmSpan.setAttribute('gen_ai.usage.output_tokens', llm.outputTokens);
-      llmSpan.setAttribute('gen_ai.usage.cache_read_tokens', llm.cacheReadInputTokens);
-      llmSpan.setAttribute('gen_ai.usage.cache_creation_tokens', llm.cacheCreationInputTokens);
+      llmSpan.setAttribute("gen_ai.operation.name", "chat");
+      llmSpan.setAttribute("gen_ai.step.index", llm.index);
+      llmSpan.setAttribute("gen_ai.request.model", modelName);
+      llmSpan.setAttribute("gen_ai.usage.input_tokens", llm.inputTokens);
+      llmSpan.setAttribute("gen_ai.usage.output_tokens", llm.outputTokens);
+      llmSpan.setAttribute(
+        "gen_ai.usage.cache_read_tokens",
+        llm.cacheReadInputTokens,
+      );
+      llmSpan.setAttribute(
+        "gen_ai.usage.cache_creation_tokens",
+        llm.cacheCreationInputTokens,
+      );
 
       // Map stop reason to gen_ai finish reason
-      const finishReason = llm.stopReason === 'tool_use' ? 'tool-calls' : 'stop';
-      llmSpan.setAttribute('gen_ai.response.finish_reasons', finishReason);
+      const finishReason =
+        llm.stopReason === "tool_use" ? "tool-calls" : "stop";
+      llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
 
       // Add completion content from the assistant event
       if (assistantEvent) {
         const completion = JSON.stringify(assistantEvent.message.content);
-        llmSpan.setAttribute('gen_ai.output.messages', this.truncate(completion, 4000));
+        llmSpan.setAttribute(
+          "gen_ai.output.messages",
+          this.truncate(completion, 4000),
+        );
       }
 
       llmSpan.setStatus({ code: SpanStatusCode.OK });
@@ -259,20 +326,29 @@ export class AmpClient {
     }
   }
 
-  private createToolCallSpans(toolCalls: ToolCallInfo[], parentContext: Context): void {
+  private createToolCallSpans(
+    toolCalls: ToolCallInfo[],
+    parentContext: Context,
+  ): void {
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(
         `execute_tool ${tool.name}`,
         { startTime: tool.startTime },
-        parentContext
+        parentContext,
       );
 
-      toolSpan.setAttribute('gen_ai.operation.name', 'execute_tool');
-      toolSpan.setAttribute('gen_ai.tool.name', tool.name);
-      toolSpan.setAttribute('gen_ai.tool.call.arguments', JSON.stringify(tool.input).slice(0, 4000));
+      toolSpan.setAttribute("gen_ai.operation.name", "execute_tool");
+      toolSpan.setAttribute("gen_ai.tool.name", tool.name);
+      toolSpan.setAttribute(
+        "gen_ai.tool.call.arguments",
+        JSON.stringify(tool.input).slice(0, 4000),
+      );
 
       if (tool.result !== undefined) {
-        toolSpan.setAttribute('gen_ai.tool.call.result', this.truncate(tool.result, 4000));
+        toolSpan.setAttribute(
+          "gen_ai.tool.call.result",
+          this.truncate(tool.result, 4000),
+        );
       }
 
       if (tool.isError) {
@@ -288,23 +364,30 @@ export class AmpClient {
   private spawnAmp(
     prompt: string,
     options: AmpInvokeOptions,
-    parentSpan: Span
+    parentSpan: Span,
   ): Promise<SpawnAmpResult> {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       const logFile = join(tmpdir(), `amp-debug-${randomUUID()}.log`);
-      const args = ['-x', '--stream-json', '--log-level', 'debug', '--log-file', logFile];
+      const args = [
+        "-x",
+        "--stream-json",
+        "--log-level",
+        "debug",
+        "--log-file",
+        logFile,
+      ];
 
-      const proc: ChildProcess = spawn('amp', args, {
+      const proc: ChildProcess = spawn("amp", args, {
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
-        stdio: ['pipe', 'pipe', 'pipe'],
+        stdio: ["pipe", "pipe", "pipe"],
       });
 
-      let stdout = '';
-      let stderr = '';
+      let stdout = "";
+      let stderr = "";
       let timeout: NodeJS.Timeout | undefined;
-      let lineBuffer = '';
+      let lineBuffer = "";
 
       const events: AmpEvent[] = [];
       const toolCalls: ToolCallInfo[] = [];
@@ -323,7 +406,7 @@ export class AmpClient {
 
       if (options.timeout) {
         timeout = setTimeout(() => {
-          proc.kill('SIGTERM');
+          proc.kill("SIGTERM");
           reject(new Error(`Amp process timed out after ${options.timeout}ms`));
         }, options.timeout);
       }
@@ -336,19 +419,19 @@ export class AmpClient {
           events.push(event);
           options.onEvent?.(event);
 
-          if (event.type === 'system' && event.subtype === 'init') {
+          if (event.type === "system" && event.subtype === "init") {
             sessionId = event.session_id;
             // LLM call starts after system init
             llmCallStartTime = Date.now();
           }
 
-          if (event.type === 'user') {
+          if (event.type === "user") {
             // User message (prompt or tool result) starts an LLM call
             llmCallStartTime = Date.now();
 
             // Match tool results to pending tool calls
             for (const block of event.message.content) {
-              if (block.type === 'tool_result') {
+              if (block.type === "tool_result") {
                 const pending = pendingToolCalls.get(block.tool_use_id);
                 if (pending) {
                   pending.endTime = Date.now();
@@ -361,7 +444,7 @@ export class AmpClient {
             }
           }
 
-          if (event.type === 'assistant') {
+          if (event.type === "assistant") {
             const now = Date.now();
             const u = event.message.usage;
 
@@ -374,7 +457,7 @@ export class AmpClient {
             // Collect tool call names from this response
             const toolCallNames: string[] = [];
             for (const block of event.message.content) {
-              if (block.type === 'tool_use') {
+              if (block.type === "tool_use") {
                 toolCallNames.push(block.name);
                 const toolCall: ToolCallInfo = {
                   id: block.id,
@@ -400,7 +483,7 @@ export class AmpClient {
             });
           }
 
-          if (event.type === 'result') {
+          if (event.type === "result") {
             finalResult = event.result;
           }
         } catch {
@@ -408,32 +491,32 @@ export class AmpClient {
         }
       };
 
-      proc.stdout?.on('data', (chunk: Buffer) => {
+      proc.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
         stdout += text;
         options.onStdout?.(text);
 
         // Parse JSON lines
         lineBuffer += text;
-        const lines = lineBuffer.split('\n');
-        lineBuffer = lines.pop() ?? '';
+        const lines = lineBuffer.split("\n");
+        lineBuffer = lines.pop() ?? "";
         for (const line of lines) {
           processLine(line);
         }
       });
 
-      proc.stderr?.on('data', (chunk: Buffer) => {
+      proc.stderr?.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
         stderr += text;
         options.onStderr?.(text);
       });
 
-      proc.on('error', (error) => {
+      proc.on("error", (error) => {
         if (timeout) clearTimeout(timeout);
         reject(error);
       });
 
-      proc.on('close', (code) => {
+      proc.on("close", (code) => {
         if (timeout) clearTimeout(timeout);
 
         // Process any remaining buffer
@@ -470,16 +553,16 @@ export class AmpClient {
 
   private truncate(str: string, maxLength: number): string {
     if (str.length <= maxLength) return str;
-    return str.slice(0, maxLength) + '... [truncated]';
+    return str.slice(0, maxLength) + "... [truncated]";
   }
 
   /**
    * BAD HACK: Parse debug log file to extract internal LLM calls from tools like Oracle.
-   * 
+   *
    * This is necessary because Amp's --stream-json doesn't expose internal LLM calls
    * made by subagents (Oracle, Task, Librarian, etc.). We scrape the debug log file
    * to get partial visibility into these calls.
-   * 
+   *
    * Limitations:
    * - No precise timing (we fake it by spacing calls evenly within parent tool span)
    * - No token counts
@@ -487,7 +570,7 @@ export class AmpClient {
    * - Fragile: depends on log format which may change
    */
   private async BAD_HACK__parseDebugLog(
-    logFile: string
+    logFile: string,
   ): Promise<DebugLogInfo> {
     const result: DebugLogInfo = {
       mainModel: null,
@@ -495,26 +578,30 @@ export class AmpClient {
     };
 
     try {
-      const content = await readFile(logFile, 'utf-8');
-      const lines = content.split('\n').filter(Boolean);
+      const content = await readFile(logFile, "utf-8");
+      const lines = content.split("\n").filter(Boolean);
 
-      let currentToolName = 'unknown';
+      let currentToolName = "unknown";
 
       for (const line of lines) {
         try {
           const entry = JSON.parse(line);
 
           // Extract the main model from inference start
-          if (entry.message === 'runInferenceAndUpdateThread: starting inference' && entry.selectedModel) {
+          if (
+            entry.message ===
+              "runInferenceAndUpdateThread: starting inference" &&
+            entry.selectedModel
+          ) {
             // selectedModel is like "anthropic/claude-opus-4-5-20251101"
-            result.mainModel = entry.selectedModel.replace('anthropic/', '');
+            result.mainModel = entry.selectedModel.replace("anthropic/", "");
           }
 
           // Track which tool is being invoked
-          if (entry.message === 'Oracle starting consultation:') {
-            currentToolName = 'oracle';
+          if (entry.message === "Oracle starting consultation:") {
+            currentToolName = "oracle";
             result.internalCalls.push({
-              model: entry.model ?? 'gpt-5.2',
+              model: entry.model ?? "gpt-5.2",
               toolName: currentToolName,
               task: entry.task,
               reasoningEffort: entry.reasoningEffort,
@@ -522,9 +609,10 @@ export class AmpClient {
           }
 
           // OpenAI scaffold requests (Oracle uses this)
-          if (entry.message === 'OpenAI scaffold making request:') {
+          if (entry.message === "OpenAI scaffold making request:") {
             // Update the last call with additional info
-            const lastCall = result.internalCalls[result.internalCalls.length - 1];
+            const lastCall =
+              result.internalCalls[result.internalCalls.length - 1];
             if (lastCall && lastCall.toolName === currentToolName) {
               lastCall.messageCount = entry.messageCount;
               lastCall.toolCount = entry.toolCount;
@@ -532,15 +620,15 @@ export class AmpClient {
           }
 
           // OpenAI scaffold completion
-          if (entry.message === 'OpenAI scaffold completed:') {
-            const lastCall = result.internalCalls[result.internalCalls.length - 1];
+          if (entry.message === "OpenAI scaffold completed:") {
+            const lastCall =
+              result.internalCalls[result.internalCalls.length - 1];
             if (lastCall && lastCall.toolName === currentToolName) {
               lastCall.toolCallCount = entry.toolCallCount;
             }
           }
 
           // Could add more patterns here for Task, Librarian, finder, etc.
-
         } catch {
           // Not valid JSON, skip
         }
@@ -561,16 +649,15 @@ export class AmpClient {
 
   /**
    * BAD HACK: Create spans for internal LLM calls extracted from debug logs.
-   * 
+   *
    * Since we don't have actual timing, we space the calls evenly within the
    * parent tool span's duration.
    */
   private BAD_HACK__createInternalLlmCallSpans(
     internalCalls: InternalLlmCall[],
     toolCalls: ToolCallInfo[],
-    parentContext: Context
+    parentContext: Context,
   ): void {
-
     // Group internal calls by their parent tool
     const callsByTool = new Map<string, InternalLlmCall[]>();
     for (const call of internalCalls) {
@@ -603,28 +690,37 @@ export class AmpClient {
         const internalSpan = this.tracer.startSpan(
           `chat ${call.model}`,
           { startTime: fakeStartTime },
-          parentContext
+          parentContext,
         );
 
-        internalSpan.setAttribute('gen_ai.operation.name', 'chat');
-        internalSpan.setAttribute('gen_ai.request.model', call.model);
-        internalSpan.setAttribute('gen_ai.provider.name', call.toolName);
-        internalSpan.setAttribute('gen_ai.internal', true); // Mark as scraped from logs
+        internalSpan.setAttribute("gen_ai.operation.name", "chat");
+        internalSpan.setAttribute("gen_ai.request.model", call.model);
+        internalSpan.setAttribute("gen_ai.provider.name", call.toolName);
+        internalSpan.setAttribute("gen_ai.internal", true); // Mark as scraped from logs
 
         if (call.task) {
-          internalSpan.setAttribute('gen_ai.input.messages', this.truncate(call.task, 4000));
+          internalSpan.setAttribute(
+            "gen_ai.input.messages",
+            this.truncate(call.task, 4000),
+          );
         }
         if (call.reasoningEffort) {
-          internalSpan.setAttribute('gen_ai.reasoning_effort', call.reasoningEffort);
+          internalSpan.setAttribute(
+            "gen_ai.reasoning_effort",
+            call.reasoningEffort,
+          );
         }
         if (call.messageCount !== undefined) {
-          internalSpan.setAttribute('gen_ai.message_count', call.messageCount);
+          internalSpan.setAttribute("gen_ai.message_count", call.messageCount);
         }
         if (call.toolCount !== undefined) {
-          internalSpan.setAttribute('gen_ai.available_tools', call.toolCount);
+          internalSpan.setAttribute("gen_ai.available_tools", call.toolCount);
         }
         if (call.toolCallCount !== undefined) {
-          internalSpan.setAttribute('gen_ai.tool_calls_made', call.toolCallCount);
+          internalSpan.setAttribute(
+            "gen_ai.tool_calls_made",
+            call.toolCallCount,
+          );
         }
 
         internalSpan.setStatus({ code: SpanStatusCode.OK });
