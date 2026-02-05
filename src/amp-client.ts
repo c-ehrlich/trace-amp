@@ -120,6 +120,10 @@ export interface LlmCallInfo {
   isInternal: boolean;
   /** Provider path for internal calls */
   providerPath?: string;
+  /** Input messages (for internal calls captured via proxy) */
+  inputMessages?: any[];
+  /** Output content (for internal calls captured via proxy) */
+  outputContent?: any[];
 }
 
 /**
@@ -141,6 +145,10 @@ interface CapturedLlmCall {
   toolCalls: { name: string; id?: string }[];
   messageCount: number;
   toolCount: number;
+  /** Input messages from request */
+  messages?: any[];
+  /** Output content from response */
+  content?: any[];
 }
 
 /**
@@ -175,6 +183,8 @@ export class AmpClient {
             toolCalls: event.toolCalls,
             messageCount: req.messageCount,
             toolCount: req.toolCount,
+            messages: req.messages,
+            content: event.content,
           });
         }
       }
@@ -272,7 +282,6 @@ export class AmpClient {
 
     // Add internal calls (Oracle, Task, etc.) with real timing and data
     for (const captured of internalCalls) {
-      const provider = captured.path.includes('/openai/') ? 'openai' : 'anthropic';
       result.push({
         index: result.length,
         model: captured.model,
@@ -286,6 +295,8 @@ export class AmpClient {
         toolCalls: captured.toolCalls.map((t) => t.name),
         isInternal: true,
         providerPath: captured.path,
+        inputMessages: captured.messages,
+        outputContent: captured.content,
       });
     }
 
@@ -414,6 +425,14 @@ export class AmpClient {
 
     if (llm.toolCalls.length > 0) {
       llmSpan.setAttribute('gen_ai.tool_calls', llm.toolCalls.join(', '));
+    }
+
+    // Add input/output messages captured from proxy
+    if (llm.inputMessages) {
+      llmSpan.setAttribute('gen_ai.input.messages', this.truncate(JSON.stringify(llm.inputMessages), 8000));
+    }
+    if (llm.outputContent) {
+      llmSpan.setAttribute('gen_ai.output.messages', this.truncate(JSON.stringify(llm.outputContent), 8000));
     }
 
     llmSpan.setStatus({ code: SpanStatusCode.OK });

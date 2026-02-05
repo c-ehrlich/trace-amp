@@ -62,7 +62,7 @@ async function main() {
       const internal = llm.isInternal ? ' (internal)' : '';
       console.log(`  - ${llm.model}${internal}: ${duration}ms, ${llm.inputTokens}in/${llm.outputTokens}out, stop=${llm.stopReason}`);
     }
-
+    
     process.exitCode = result.exitCode;
   } catch (error) {
     console.error('Error:', error);

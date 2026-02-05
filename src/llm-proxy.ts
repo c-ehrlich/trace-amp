@@ -20,6 +20,8 @@ export interface LlmRequestEvent {
   maxTokens: number | null;
   stream: boolean;
   reasoning?: { effort: string; summary?: string };
+  /** The input messages sent to the LLM */
+  messages?: any[];
 }
 
 export interface LlmResponseEvent {
@@ -39,6 +41,8 @@ export interface LlmResponseEvent {
   stopReason: string | null;
   toolCalls: { name: string; id?: string }[];
   durationMs: number;
+  /** The output content from the LLM */
+  content?: any[];
 }
 
 export type LlmProxyEvent = LlmRequestEvent | LlmResponseEvent;
@@ -141,6 +145,7 @@ export class LlmProxy extends EventEmitter {
     let maxTokens: number | null = null;
     let stream = false;
     let reasoning: { effort: string; summary?: string } | undefined;
+    let messages: any[] | undefined;
 
     try {
       const parsed = JSON.parse(body);
@@ -149,6 +154,15 @@ export class LlmProxy extends EventEmitter {
       toolCount = parsed.tools?.length ?? 0;
       maxTokens = parsed.max_tokens ?? null;
       stream = parsed.stream ?? false;
+      messages = parsed.messages;
+
+      // OpenAI Responses API uses 'input' instead of 'messages'
+      if (!messages && parsed.input) {
+        messages = Array.isArray(parsed.input) ? parsed.input : [{ role: 'user', content: parsed.input }];
+      }
+      if (messages) {
+        messageCount = messages.length;
+      }
 
       if (parsed.reasoning) {
         reasoning = {
@@ -178,6 +192,7 @@ export class LlmProxy extends EventEmitter {
       maxTokens,
       stream,
       ...(reasoning && { reasoning }),
+      ...(messages && { messages }),
     };
 
     this.emit('llm', event);
@@ -214,9 +229,12 @@ export class LlmProxy extends EventEmitter {
     let usage: LlmResponseEvent['usage'] = null;
     let stopReason: string | null = null;
     const toolCalls: { name: string; id?: string }[] = [];
+    let responseContent: any[] | undefined;
 
     if (isStreaming) {
-      // Parse SSE stream
+      // Parse SSE stream - accumulate content from stream events
+      const textParts: string[] = [];
+      
       for (const line of body.split('\n')) {
         if (!line.startsWith('data:')) continue;
         const data = line.slice(5).trim();
@@ -225,15 +243,42 @@ export class LlmProxy extends EventEmitter {
         try {
           const event = JSON.parse(data);
           this.parseEventData(event, { usage, stopReason, toolCalls }, (u) => (usage = u), (s) => (stopReason = s));
+          
+          // Anthropic streaming: accumulate text deltas
+          if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+            textParts.push(event.delta.text);
+          }
+          
+          // OpenAI Responses API: extract output from response.completed
+          if (event.type === 'response.completed' || event.type === 'response.done') {
+            const output = event.response?.output;
+            if (output) {
+              responseContent = Array.isArray(output) ? output : [output];
+            }
+          }
         } catch {
           // Skip malformed events
         }
+      }
+      
+      // If we accumulated text, create content array
+      if (textParts.length > 0 && !responseContent) {
+        responseContent = [{ type: 'text', text: textParts.join('') }];
       }
     } else {
       // Parse JSON response
       try {
         const parsed = JSON.parse(body);
         this.parseResponseBody(parsed, { usage, stopReason, toolCalls }, (u) => (usage = u), (s) => (stopReason = s));
+        
+        // Extract content from non-streaming response
+        if (parsed.content) {
+          responseContent = parsed.content;
+        } else if (parsed.choices?.[0]?.message?.content) {
+          responseContent = [{ type: 'text', text: parsed.choices[0].message.content }];
+        } else if (parsed.output) {
+          responseContent = Array.isArray(parsed.output) ? parsed.output : [parsed.output];
+        }
       } catch {
         // Not JSON
       }
@@ -251,6 +296,7 @@ export class LlmProxy extends EventEmitter {
       stopReason,
       toolCalls,
       durationMs: endTime - pending.startTime,
+      ...(responseContent && { content: responseContent }),
     };
 
     this.emit('llm', event);
