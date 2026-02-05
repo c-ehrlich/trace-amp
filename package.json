@@ -1,12 +1,24 @@
 {
   "name": "trace-amp",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "type": "module",
+  "license": "MIT",
+  "bin": {
+    "trace-amp": "./dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/c-ehrlich/trace-amp.git"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/example.js",
     "dev": "tsx src/example.ts",
-    "wrapped-amp": "tsx src/cli.ts"
+    "wrapped-amp": "tsx src/cli.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
@@ -18,8 +30,16 @@
     "http-mitm-proxy": "^1.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.28.0",
     "@types/node": "^22.0.0",
+    "eslint": "^9.28.0",
+    "prettier": "^3.5.3",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
-  }
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.34.0"
+  },
+  "packageManager": "pnpm@10.12.1",
+  "files": [
+    "dist"
+  ]
 }

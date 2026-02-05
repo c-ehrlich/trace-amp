@@ -69,10 +69,10 @@ export class LlmProxy extends EventEmitter {
   constructor(options: LlmProxyOptions = {}) {
     super();
     this.port = options.port ?? 0; // 0 = random available port
-    
+
     // Suppress library noise before creating proxy (it logs during construction)
     this.suppressLibraryNoise();
-    
+
     this.proxy = new Proxy();
     this.proxy.keepAlive = false;
 
@@ -159,7 +159,9 @@ export class LlmProxy extends EventEmitter {
 
       // OpenAI Responses API uses 'input' instead of 'messages'
       if (!messages && parsed.input) {
-        messages = Array.isArray(parsed.input) ? parsed.input : [{ role: 'user', content: parsed.input }];
+        messages = Array.isArray(parsed.input)
+          ? parsed.input
+          : [{ role: 'user', content: parsed.input }];
       }
       if (messages) {
         messageCount = messages.length;
@@ -203,7 +205,7 @@ export class LlmProxy extends EventEmitter {
     requestId: string,
     status: number,
     headers: Record<string, string | string[] | undefined>,
-    chunks: Buffer[]
+    chunks: Buffer[],
   ): void {
     const pending = this.pendingRequests.get(requestId);
     if (!pending) return;
@@ -235,7 +237,7 @@ export class LlmProxy extends EventEmitter {
     if (isStreaming) {
       // Parse SSE stream - accumulate content from stream events
       const textParts: string[] = [];
-      
+
       for (const line of body.split('\n')) {
         if (!line.startsWith('data:')) continue;
         const data = line.slice(5).trim();
@@ -243,13 +245,18 @@ export class LlmProxy extends EventEmitter {
 
         try {
           const event = JSON.parse(data);
-          this.parseEventData(event, { usage, stopReason, toolCalls }, (u) => (usage = u), (s) => (stopReason = s));
-          
+          this.parseEventData(
+            event,
+            { usage, stopReason, toolCalls },
+            (u) => (usage = u),
+            (s) => (stopReason = s),
+          );
+
           // Anthropic streaming: accumulate text deltas
           if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
             textParts.push(event.delta.text);
           }
-          
+
           // OpenAI Responses API: extract output from response.completed
           if (event.type === 'response.completed' || event.type === 'response.done') {
             const output = event.response?.output;
@@ -261,7 +268,7 @@ export class LlmProxy extends EventEmitter {
           // Skip malformed events
         }
       }
-      
+
       // If we accumulated text, create content array
       if (textParts.length > 0 && !responseContent) {
         responseContent = [{ type: 'text', text: textParts.join('') }];
@@ -270,8 +277,13 @@ export class LlmProxy extends EventEmitter {
       // Parse JSON response
       try {
         const parsed = JSON.parse(body);
-        this.parseResponseBody(parsed, { usage, stopReason, toolCalls }, (u) => (usage = u), (s) => (stopReason = s));
-        
+        this.parseResponseBody(
+          parsed,
+          { usage, stopReason, toolCalls },
+          (u) => (usage = u),
+          (s) => (stopReason = s),
+        );
+
         // Extract content from non-streaming response
         if (parsed.content) {
           responseContent = parsed.content;
@@ -305,9 +317,13 @@ export class LlmProxy extends EventEmitter {
 
   private parseEventData(
     event: any,
-    state: { usage: LlmResponseEvent['usage']; stopReason: string | null; toolCalls: { name: string; id?: string }[] },
+    state: {
+      usage: LlmResponseEvent['usage'];
+      stopReason: string | null;
+      toolCalls: { name: string; id?: string }[];
+    },
     setUsage: (u: LlmResponseEvent['usage']) => void,
-    setStopReason: (s: string) => void
+    setStopReason: (s: string) => void,
   ): void {
     // Anthropic format
     if (event.type === 'message_start') {
@@ -346,7 +362,7 @@ export class LlmProxy extends EventEmitter {
     if (event.choices?.[0]?.finish_reason) {
       setStopReason(event.choices[0].finish_reason);
     }
-    
+
     // OpenAI Responses API format (used by Oracle)
     if (event.type === 'response.completed' || event.type === 'response.done') {
       const response = event.response;
@@ -364,9 +380,13 @@ export class LlmProxy extends EventEmitter {
 
   private parseResponseBody(
     body: any,
-    state: { usage: LlmResponseEvent['usage']; stopReason: string | null; toolCalls: { name: string; id?: string }[] },
+    state: {
+      usage: LlmResponseEvent['usage'];
+      stopReason: string | null;
+      toolCalls: { name: string; id?: string }[];
+    },
     setUsage: (u: LlmResponseEvent['usage']) => void,
-    setStopReason: (s: string) => void
+    setStopReason: (s: string) => void,
   ): void {
     // Anthropic format
     if (body.usage) {
@@ -428,7 +448,7 @@ export class LlmProxy extends EventEmitter {
       resolve();
     });
   }
-  
+
   private originalConsoleDebug: typeof console.debug | null = null;
   private originalConsoleLog: typeof console.log | null = null;
   private originalConsoleError: typeof console.error | null = null;
@@ -437,7 +457,7 @@ export class LlmProxy extends EventEmitter {
     this.originalConsoleDebug = console.debug;
     this.originalConsoleLog = console.log;
     this.originalConsoleError = console.error;
-    
+
     const isProxyNoise = (msg: string): boolean => {
       return (
         msg.includes('ECONNRESET') ||
@@ -449,17 +469,17 @@ export class LlmProxy extends EventEmitter {
         msg.includes('Error getting HTTPs')
       );
     };
-    
+
     console.debug = (...args: any[]) => {
       if (isProxyNoise(String(args[0] ?? ''))) return;
       this.originalConsoleDebug?.apply(console, args);
     };
-    
+
     console.log = (...args: any[]) => {
       if (isProxyNoise(String(args[0] ?? ''))) return;
       this.originalConsoleLog?.apply(console, args);
     };
-    
+
     console.error = (...args: any[]) => {
       const msg = String(args[0] ?? '');
       // Filter proxy errors but allow the Error object if it's not ECONNRESET
