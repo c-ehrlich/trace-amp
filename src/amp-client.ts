@@ -184,7 +184,6 @@ export class AmpClient {
     return this.tracer.startActiveSpan("amp", async (span: Span) => {
       try {
         span.setAttribute("gen_ai.capability.name", "amp");
-        span.setAttribute("gen_ai.operation.name", "chat");
         span.setAttribute("gen_ai.input.messages", this.truncate(prompt, 4000));
         span.setAttribute("gen_ai.provider.name", "amp");
 
