@@ -14,3 +14,6 @@ export type {
 } from './amp-client.js';
 export { initTracing, shutdownTracing, getTracer } from './tracing.js';
 export type { TracingConfig } from './tracing.js';
+
+// Re-export Context type for parentContext option
+export type { Context } from '@opentelemetry/api';
