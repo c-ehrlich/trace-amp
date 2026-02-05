@@ -35,17 +35,20 @@ async function main() {
     console.log(`Duration: ${result.durationMs}ms`);
     console.log(`LLM calls: ${result.llmCalls.length}`);
     for (const llm of result.llmCalls) {
-      console.log(`  [${llm.index}] ${llm.stopReason} - ${llm.endTime - llm.startTime}ms, ${llm.inputTokens}+${llm.outputTokens} tokens${llm.toolCalls.length ? ` → ${llm.toolCalls.join(', ')}` : ''}`);
+      console.log(
+        `  [${llm.index}] ${llm.stopReason} - ${llm.endTime - llm.startTime}ms, ${llm.inputTokens}+${llm.outputTokens} tokens${llm.toolCalls.length ? ` → ${llm.toolCalls.join(', ')}` : ''}`,
+      );
     }
     console.log(`Tool calls: ${result.toolCalls.length}`);
     for (const tool of result.toolCalls) {
       console.log(`  - ${tool.name} (${tool.endTime! - tool.startTime}ms)`);
     }
     console.log(`Total tokens: ${result.usage.inputTokens} in, ${result.usage.outputTokens} out`);
-    console.log(`Cache: ${result.usage.cacheReadInputTokens} read, ${result.usage.cacheCreationInputTokens} created`);
+    console.log(
+      `Cache: ${result.usage.cacheReadInputTokens} read, ${result.usage.cacheCreationInputTokens} created`,
+    );
     console.log(`Result: ${result.finalResult}`);
     console.log('\n(Internal LLM calls from Oracle are captured as gen_ai.step.internal spans)');
-
   } catch (error) {
     console.error('Error:', error);
   } finally {

@@ -14,7 +14,9 @@ async function main() {
 
   if (!endpoint || !headersEnv) {
     console.error('Error: Missing required environment variables.');
-    console.error('Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS in .env or environment.');
+    console.error(
+      'Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS in .env or environment.',
+    );
     console.error('See .env.example for details.');
     process.exit(1);
   }
@@ -56,13 +58,15 @@ async function main() {
     console.log(`Duration: ${result.durationMs}ms`);
     console.log(`Tokens: ${result.usage.inputTokens} in, ${result.usage.outputTokens} out`);
     console.log(`LLM calls: ${result.llmCalls.length}, Tool calls: ${result.toolCalls.length}`);
-    
+
     for (const llm of result.llmCalls) {
       const duration = llm.endTime - llm.startTime;
       const internal = llm.isInternal ? ' (internal)' : '';
-      console.log(`  - ${llm.model}${internal}: ${duration}ms, ${llm.inputTokens}in/${llm.outputTokens}out, stop=${llm.stopReason}`);
+      console.log(
+        `  - ${llm.model}${internal}: ${duration}ms, ${llm.inputTokens}in/${llm.outputTokens}out, stop=${llm.stopReason}`,
+      );
     }
-    
+
     process.exitCode = result.exitCode;
   } catch (error) {
     console.error('Error:', error);

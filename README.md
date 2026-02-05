@@ -6,24 +6,31 @@ OpenTelemetry instrumentation for [Amp](https://ampcode.com) CLI.
 
 Fully vibe coded, use at your own risk.
 
-## Setup
+## Installation
 
 ```bash
-cp .env.example .env
-# Edit .env with your Axiom API token and dataset
+npm install -g trace-amp
 ```
 
-## Quick Start (Development)
+## Usage
+
+Set the required environment variables:
 
 ```bash
-pnpm wrapped-amp "ask the oracle to add 2+2"
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.axiom.co/v1/traces"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer your-api-token,X-Axiom-Dataset=your-dataset"
 ```
 
-## Build & Run Binary
+Then run:
 
 ```bash
-pnpm build
-node dist/cli.js "ask the oracle to add 2+2"
+trace-amp "ask the oracle to add 2+2"
+```
+
+Or use `npx` without installing globally:
+
+```bash
+npx trace-amp "ask the oracle to add 2+2"
 ```
 
 ## TypeScript Usage

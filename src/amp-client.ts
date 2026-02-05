@@ -1,18 +1,7 @@
-import { spawn, ChildProcess } from "child_process";
-import {
-  Span,
-  SpanStatusCode,
-  context as otelContext,
-  trace,
-  Context,
-} from "@opentelemetry/api";
-import { getTracer } from "./tracing.js";
-import {
-  LlmProxy,
-  LlmRequestEvent,
-  LlmResponseEvent,
-  LlmProxyEvent,
-} from "./llm-proxy.js";
+import { spawn, ChildProcess } from 'child_process';
+import { Span, SpanStatusCode, context as otelContext, trace, Context } from '@opentelemetry/api';
+import { getTracer } from './tracing.js';
+import { LlmProxy, LlmRequestEvent, LlmProxyEvent } from './llm-proxy.js';
 
 export interface AmpInvokeOptions {
   /** Working directory for the amp process */
@@ -52,15 +41,11 @@ export interface AmpUsage {
 }
 
 // Amp stream-json event types
-export type AmpEvent =
-  | AmpSystemEvent
-  | AmpUserEvent
-  | AmpAssistantEvent
-  | AmpResultEvent;
+export type AmpEvent = AmpSystemEvent | AmpUserEvent | AmpAssistantEvent | AmpResultEvent;
 
 export interface AmpSystemEvent {
-  type: "system";
-  subtype: "init";
+  type: 'system';
+  subtype: 'init';
   cwd: string;
   session_id: string;
   tools: string[];
@@ -68,9 +53,9 @@ export interface AmpSystemEvent {
 }
 
 export interface AmpUserEvent {
-  type: "user";
+  type: 'user';
   message: {
-    role: "user";
+    role: 'user';
     content: AmpContentBlock[];
   };
   parent_tool_use_id: string | null;
@@ -78,12 +63,12 @@ export interface AmpUserEvent {
 }
 
 export interface AmpAssistantEvent {
-  type: "assistant";
+  type: 'assistant';
   message: {
-    type: "message";
-    role: "assistant";
+    type: 'message';
+    role: 'assistant';
     content: AmpContentBlock[];
-    stop_reason: "end_turn" | "tool_use";
+    stop_reason: 'end_turn' | 'tool_use';
     usage: {
       input_tokens: number;
       output_tokens: number;
@@ -98,8 +83,8 @@ export interface AmpAssistantEvent {
 }
 
 export interface AmpResultEvent {
-  type: "result";
-  subtype: "success" | "error";
+  type: 'result';
+  subtype: 'success' | 'error';
   duration_ms: number;
   is_error: boolean;
   num_turns: number;
@@ -108,15 +93,15 @@ export interface AmpResultEvent {
 }
 
 export type AmpContentBlock =
-  | { type: "text"; text: string }
+  | { type: 'text'; text: string }
   | {
-      type: "tool_use";
+      type: 'tool_use';
       id: string;
       name: string;
       input: Record<string, unknown>;
     }
   | {
-      type: "tool_result";
+      type: 'tool_result';
       tool_use_id: string;
       content: string;
       is_error: boolean;
@@ -135,7 +120,7 @@ export interface ToolCallInfo {
 export interface LlmCallInfo {
   index: number;
   model: string;
-  stopReason: "end_turn" | "tool_use" | string;
+  stopReason: 'end_turn' | 'tool_use' | string;
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number;
@@ -183,20 +168,17 @@ interface CapturedLlmCall {
  * Uses an HTTPS proxy to capture all LLM calls including internal ones.
  */
 export class AmpClient {
-  private readonly tracer = getTracer("amp-client");
+  private readonly tracer = getTracer('amp-client');
   private proxy: LlmProxy | null = null;
 
-  async invoke(
-    prompt: string,
-    options: AmpInvokeOptions = {},
-  ): Promise<AmpResult> {
+  async invoke(prompt: string, options: AmpInvokeOptions = {}): Promise<AmpResult> {
     // Start proxy to capture LLM calls
     this.proxy = new LlmProxy();
     const capturedCalls: CapturedLlmCall[] = [];
     const pendingRequests = new Map<string, LlmRequestEvent>();
 
-    this.proxy.on("llm", (event: LlmProxyEvent) => {
-      if (event.type === "request") {
+    this.proxy.on('llm', (event: LlmProxyEvent) => {
+      if (event.type === 'request') {
         pendingRequests.set(event.requestId, event);
       } else {
         const req = pendingRequests.get(event.requestId);
@@ -205,7 +187,7 @@ export class AmpClient {
           capturedCalls.push({
             requestId: event.requestId,
             path: event.path,
-            model: event.model ?? req.model ?? "unknown",
+            model: event.model ?? req.model ?? 'unknown',
             startTime: req.timestamp,
             endTime: event.timestamp,
             usage: event.usage,
@@ -223,47 +205,29 @@ export class AmpClient {
     const { port, caPath } = await this.proxy.start();
     const parentContext = options.parentContext ?? otelContext.active();
 
-    return this.tracer.startActiveSpan("amp", {}, parentContext, async (span: Span) => {
+    return this.tracer.startActiveSpan('amp', {}, parentContext, async (span: Span) => {
       try {
-        span.setAttribute("gen_ai.capability.name", "amp");
-        span.setAttribute("gen_ai.input.messages", this.truncate(prompt, 4000));
-        span.setAttribute("gen_ai.provider.name", "amp");
+        span.setAttribute('gen_ai.capability.name', 'amp');
+        span.setAttribute('gen_ai.input.messages', this.truncate(prompt, 4000));
+        span.setAttribute('gen_ai.provider.name', 'amp');
 
         const result = await this.spawnAmp(prompt, options, port, caPath);
 
+        span.setAttribute('gen_ai.conversation.id', result.sessionId ?? 'unknown');
+        span.setAttribute('gen_ai.usage.input_tokens', result.usage.inputTokens);
+        span.setAttribute('gen_ai.usage.output_tokens', result.usage.outputTokens);
+        span.setAttribute('gen_ai.usage.cache_read_tokens', result.usage.cacheReadInputTokens);
         span.setAttribute(
-          "gen_ai.conversation.id",
-          result.sessionId ?? "unknown",
-        );
-        span.setAttribute(
-          "gen_ai.usage.input_tokens",
-          result.usage.inputTokens,
-        );
-        span.setAttribute(
-          "gen_ai.usage.output_tokens",
-          result.usage.outputTokens,
-        );
-        span.setAttribute(
-          "gen_ai.usage.cache_read_tokens",
-          result.usage.cacheReadInputTokens,
-        );
-        span.setAttribute(
-          "gen_ai.usage.cache_creation_tokens",
+          'gen_ai.usage.cache_creation_tokens',
           result.usage.cacheCreationInputTokens,
         );
-        span.setAttribute("amp.exit_code", result.exitCode);
+        span.setAttribute('amp.exit_code', result.exitCode);
 
         if (result.finalResult) {
-          span.setAttribute(
-            "gen_ai.output.messages",
-            this.truncate(result.finalResult, 4000),
-          );
+          span.setAttribute('gen_ai.output.messages', this.truncate(result.finalResult, 4000));
         }
 
-        if (
-          result.exitCode !== 0 ||
-          result.events.some((e) => e.type === "result" && e.is_error)
-        ) {
+        if (result.exitCode !== 0 || result.events.some((e) => e.type === 'result' && e.is_error)) {
           span.setStatus({
             code: SpanStatusCode.ERROR,
             message: `Exit code ${result.exitCode}: ${this.truncate(result.stderr, 500)}`,
@@ -273,10 +237,7 @@ export class AmpClient {
         }
 
         // Enrich result with captured LLM calls
-        const enrichedLlmCalls = this.enrichLlmCalls(
-          result.llmCalls,
-          capturedCalls,
-        );
+        const enrichedLlmCalls = this.enrichLlmCalls(result.llmCalls, capturedCalls);
 
         // Separate main agent LLM calls from internal tool LLM calls
         const mainLlmCalls = enrichedLlmCalls.filter((c) => !c.isInternal);
@@ -287,11 +248,7 @@ export class AmpClient {
         // Create child spans for main LLM calls
         this.createLlmCallSpans(mainLlmCalls, result.events, spanContext);
         // Create tool spans with internal LLM calls nested inside
-        this.createToolCallSpans(
-          result.toolCalls,
-          internalLlmCalls,
-          spanContext,
-        );
+        this.createToolCallSpans(result.toolCalls, internalLlmCalls, spanContext);
 
         return { ...result, llmCalls: enrichedLlmCalls };
       } catch (error) {
@@ -299,9 +256,7 @@ export class AmpClient {
           code: SpanStatusCode.ERROR,
           message: error instanceof Error ? error.message : String(error),
         });
-        span.recordException(
-          error instanceof Error ? error : new Error(String(error)),
-        );
+        span.recordException(error instanceof Error ? error : new Error(String(error)));
         throw error;
       } finally {
         span.end();
@@ -323,12 +278,8 @@ export class AmpClient {
 
     // Match stream calls with captured calls by approximate timing
     // The main agent calls go to /api/provider/anthropic/v1/messages
-    const mainCalls = capturedCalls.filter((c) =>
-      c.path.includes("/anthropic/"),
-    );
-    const internalCalls = capturedCalls.filter(
-      (c) => !c.path.includes("/anthropic/"),
-    );
+    const mainCalls = capturedCalls.filter((c) => c.path.includes('/anthropic/'));
+    const internalCalls = capturedCalls.filter((c) => !c.path.includes('/anthropic/'));
 
     // For main calls, merge with stream data to get full picture
     for (let i = 0; i < streamCalls.length; i++) {
@@ -342,7 +293,7 @@ export class AmpClient {
 
       result.push({
         ...streamCall,
-        model: matchedCapture?.model ?? streamCall.model ?? "claude",
+        model: matchedCapture?.model ?? streamCall.model ?? 'claude',
         startTime: matchedCapture?.startTime ?? streamCall.startTime,
         endTime: matchedCapture?.endTime ?? streamCall.endTime,
         isInternal: false,
@@ -354,7 +305,7 @@ export class AmpClient {
       result.push({
         index: result.length,
         model: captured.model,
-        stopReason: captured.stopReason ?? "unknown",
+        stopReason: captured.stopReason ?? 'unknown',
         inputTokens: captured.usage?.inputTokens ?? 0,
         outputTokens: captured.usage?.outputTokens ?? 0,
         cacheCreationInputTokens: captured.usage?.cacheCreationTokens ?? 0,
@@ -385,9 +336,7 @@ export class AmpClient {
       content: AmpContentBlock[];
     }> = [];
     let assistantEventIndex = 0;
-    const assistantEvents = events.filter(
-      (e): e is AmpAssistantEvent => e.type === "assistant",
-    );
+    const assistantEvents = events.filter((e): e is AmpAssistantEvent => e.type === 'assistant');
 
     for (let i = 0; i < llmCalls.length; i++) {
       const llm = llmCalls[i];
@@ -395,69 +344,50 @@ export class AmpClient {
       // Build conversation history for non-internal calls
       if (!llm.isInternal && i === 0) {
         for (const event of events) {
-          if (event.type === "user") {
+          if (event.type === 'user') {
             conversationMessages.push({
-              role: "user",
+              role: 'user',
               content: event.message.content,
             });
-          } else if (event.type === "assistant") {
+          } else if (event.type === 'assistant') {
             break;
           }
         }
       }
 
-      const spanName = llm.isInternal
-        ? `chat ${llm.model} (internal)`
-        : `chat ${llm.model}`;
+      const spanName = llm.isInternal ? `chat ${llm.model} (internal)` : `chat ${llm.model}`;
 
-      const llmSpan = this.tracer.startSpan(
-        spanName,
-        { startTime: llm.startTime },
-        parentContext,
-      );
-      llmSpan.setAttribute("gen_ai.operation.name", "chat");
-      llmSpan.setAttribute("gen_ai.step.index", llm.index);
-      llmSpan.setAttribute("gen_ai.request.model", llm.model);
-      llmSpan.setAttribute("gen_ai.usage.input_tokens", llm.inputTokens);
-      llmSpan.setAttribute("gen_ai.usage.output_tokens", llm.outputTokens);
-      llmSpan.setAttribute(
-        "gen_ai.usage.cache_read_tokens",
-        llm.cacheReadInputTokens,
-      );
-      llmSpan.setAttribute(
-        "gen_ai.usage.cache_creation_tokens",
-        llm.cacheCreationInputTokens,
-      );
-      llmSpan.setAttribute("gen_ai.internal", llm.isInternal);
+      const llmSpan = this.tracer.startSpan(spanName, { startTime: llm.startTime }, parentContext);
+      llmSpan.setAttribute('gen_ai.operation.name', 'chat');
+      llmSpan.setAttribute('gen_ai.step.index', llm.index);
+      llmSpan.setAttribute('gen_ai.request.model', llm.model);
+      llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
+      llmSpan.setAttribute('gen_ai.usage.output_tokens', llm.outputTokens);
+      llmSpan.setAttribute('gen_ai.usage.cache_read_tokens', llm.cacheReadInputTokens);
+      llmSpan.setAttribute('gen_ai.usage.cache_creation_tokens', llm.cacheCreationInputTokens);
+      llmSpan.setAttribute('gen_ai.internal', llm.isInternal);
 
       if (llm.providerPath) {
-        llmSpan.setAttribute("gen_ai.provider_path", llm.providerPath);
+        llmSpan.setAttribute('gen_ai.provider_path', llm.providerPath);
       }
 
-      const finishReason =
-        llm.stopReason === "tool_use" ? "tool-calls" : "stop";
-      llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
+      const finishReason = llm.stopReason === 'tool_use' ? 'tool-calls' : 'stop';
+      llmSpan.setAttribute('gen_ai.response.finish_reasons', finishReason);
 
       if (!llm.isInternal && conversationMessages.length > 0) {
         const input = JSON.stringify(conversationMessages);
-        llmSpan.setAttribute(
-          "gen_ai.input.messages",
-          this.truncate(input, 4000),
-        );
+        llmSpan.setAttribute('gen_ai.input.messages', this.truncate(input, 4000));
       }
 
       if (!llm.isInternal) {
         const assistantEvent = assistantEvents[assistantEventIndex++];
         if (assistantEvent) {
           const completion = JSON.stringify(assistantEvent.message.content);
-          llmSpan.setAttribute(
-            "gen_ai.output.messages",
-            this.truncate(completion, 4000),
-          );
+          llmSpan.setAttribute('gen_ai.output.messages', this.truncate(completion, 4000));
 
           // Add assistant message to conversation for next iteration
           conversationMessages.push({
-            role: "assistant",
+            role: 'assistant',
             content: assistantEvent.message.content,
           });
         }
@@ -480,24 +410,16 @@ export class AmpClient {
         parentContext,
       );
 
-      toolSpan.setAttribute("gen_ai.operation.name", "execute_tool");
-      toolSpan.setAttribute("gen_ai.tool.name", tool.name);
-      const argsValue = this.isPlainObject(tool.input)
-        ? tool.input
-        : { arguments: tool.input };
-      toolSpan.setAttribute(
-        "gen_ai.tool.arguments",
-        JSON.stringify(argsValue).slice(0, 4000),
-      );
+      toolSpan.setAttribute('gen_ai.operation.name', 'execute_tool');
+      toolSpan.setAttribute('gen_ai.tool.name', tool.name);
+      const argsValue = this.isPlainObject(tool.input) ? tool.input : { arguments: tool.input };
+      toolSpan.setAttribute('gen_ai.tool.arguments', JSON.stringify(argsValue).slice(0, 4000));
 
       if (tool.result !== undefined) {
         const resultValue = this.isPlainObject(tool.result)
           ? tool.result
           : { content: this.truncate(tool.result, 4000) };
-        toolSpan.setAttribute(
-          "gen_ai.tool.call.result",
-          JSON.stringify(resultValue),
-        );
+        toolSpan.setAttribute('gen_ai.tool.call.result', JSON.stringify(resultValue));
       }
 
       if (tool.isError) {
@@ -512,9 +434,7 @@ export class AmpClient {
       const toolEnd = tool.endTime ?? Date.now();
       const tolerance = 100;
       const childLlmCalls = internalLlmCalls.filter(
-        (llm) =>
-          llm.startTime >= tool.startTime - tolerance &&
-          llm.endTime <= toolEnd + tolerance,
+        (llm) => llm.startTime >= tool.startTime - tolerance && llm.endTime <= toolEnd + tolerance,
       );
 
       // Create child LLM spans under this tool span
@@ -529,51 +449,42 @@ export class AmpClient {
     }
   }
 
-  private createInternalLlmSpan(
-    llm: LlmCallInfo,
-    parentContext: Context,
-  ): void {
+  private createInternalLlmSpan(llm: LlmCallInfo, parentContext: Context): void {
     const llmSpan = this.tracer.startSpan(
       `chat ${llm.model}`,
       { startTime: llm.startTime },
       parentContext,
     );
 
-    llmSpan.setAttribute("gen_ai.operation.name", "chat");
-    llmSpan.setAttribute("gen_ai.request.model", llm.model);
-    llmSpan.setAttribute("gen_ai.usage.input_tokens", llm.inputTokens);
-    llmSpan.setAttribute("gen_ai.usage.output_tokens", llm.outputTokens);
-    llmSpan.setAttribute(
-      "gen_ai.usage.cache_read_tokens",
-      llm.cacheReadInputTokens,
-    );
-    llmSpan.setAttribute(
-      "gen_ai.usage.cache_creation_tokens",
-      llm.cacheCreationInputTokens,
-    );
-    llmSpan.setAttribute("gen_ai.internal", true);
+    llmSpan.setAttribute('gen_ai.operation.name', 'chat');
+    llmSpan.setAttribute('gen_ai.request.model', llm.model);
+    llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
+    llmSpan.setAttribute('gen_ai.usage.output_tokens', llm.outputTokens);
+    llmSpan.setAttribute('gen_ai.usage.cache_read_tokens', llm.cacheReadInputTokens);
+    llmSpan.setAttribute('gen_ai.usage.cache_creation_tokens', llm.cacheCreationInputTokens);
+    llmSpan.setAttribute('gen_ai.internal', true);
 
     if (llm.providerPath) {
-      llmSpan.setAttribute("gen_ai.provider_path", llm.providerPath);
+      llmSpan.setAttribute('gen_ai.provider_path', llm.providerPath);
     }
 
-    const finishReason = llm.stopReason === "tool_use" ? "tool-calls" : "stop";
-    llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
+    const finishReason = llm.stopReason === 'tool_use' ? 'tool-calls' : 'stop';
+    llmSpan.setAttribute('gen_ai.response.finish_reasons', finishReason);
 
     if (llm.toolCalls.length > 0) {
-      llmSpan.setAttribute("gen_ai.tool_calls", llm.toolCalls.join(", "));
+      llmSpan.setAttribute('gen_ai.tool_calls', llm.toolCalls.join(', '));
     }
 
     // Add input/output messages captured from proxy
     if (llm.inputMessages) {
       llmSpan.setAttribute(
-        "gen_ai.input.messages",
+        'gen_ai.input.messages',
         this.truncate(JSON.stringify(llm.inputMessages), 8000),
       );
     }
     if (llm.outputContent) {
       llmSpan.setAttribute(
-        "gen_ai.output.messages",
+        'gen_ai.output.messages',
         this.truncate(JSON.stringify(llm.outputContent), 8000),
       );
     }
@@ -590,9 +501,9 @@ export class AmpClient {
   ): Promise<AmpResult> {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
-      const args = ["-x", "--stream-json"];
+      const args = ['-x', '--stream-json'];
 
-      const proc: ChildProcess = spawn("amp", args, {
+      const proc: ChildProcess = spawn('amp', args, {
         cwd: options.cwd,
         env: {
           ...process.env,
@@ -601,13 +512,13 @@ export class AmpClient {
           HTTPS_PROXY: `http://127.0.0.1:${proxyPort}`,
           NODE_EXTRA_CA_CERTS: caCertPath,
         },
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      let stdout = "";
-      let stderr = "";
+      let stdout = '';
+      let stderr = '';
       let timeout: NodeJS.Timeout | undefined;
-      let lineBuffer = "";
+      let lineBuffer = '';
 
       const events: AmpEvent[] = [];
       const toolCalls: ToolCallInfo[] = [];
@@ -626,7 +537,7 @@ export class AmpClient {
 
       if (options.timeout) {
         timeout = setTimeout(() => {
-          proc.kill("SIGTERM");
+          proc.kill('SIGTERM');
           reject(new Error(`Amp process timed out after ${options.timeout}ms`));
         }, options.timeout);
       }
@@ -639,16 +550,16 @@ export class AmpClient {
           events.push(event);
           options.onEvent?.(event);
 
-          if (event.type === "system" && event.subtype === "init") {
+          if (event.type === 'system' && event.subtype === 'init') {
             sessionId = event.session_id;
             llmCallStartTime = Date.now();
           }
 
-          if (event.type === "user") {
+          if (event.type === 'user') {
             llmCallStartTime = Date.now();
 
             for (const block of event.message.content) {
-              if (block.type === "tool_result") {
+              if (block.type === 'tool_result') {
                 const pending = pendingToolCalls.get(block.tool_use_id);
                 if (pending) {
                   pending.endTime = Date.now();
@@ -661,7 +572,7 @@ export class AmpClient {
             }
           }
 
-          if (event.type === "assistant") {
+          if (event.type === 'assistant') {
             const now = Date.now();
             const u = event.message.usage;
 
@@ -672,7 +583,7 @@ export class AmpClient {
 
             const toolCallNames: string[] = [];
             for (const block of event.message.content) {
-              if (block.type === "tool_use") {
+              if (block.type === 'tool_use') {
                 toolCallNames.push(block.name);
                 const toolCall: ToolCallInfo = {
                   id: block.id,
@@ -686,7 +597,7 @@ export class AmpClient {
 
             llmCalls.push({
               index: llmCallIndex++,
-              model: "claude", // Will be enriched by proxy data
+              model: 'claude', // Will be enriched by proxy data
               stopReason: event.message.stop_reason,
               inputTokens: u.input_tokens,
               outputTokens: u.output_tokens,
@@ -699,7 +610,7 @@ export class AmpClient {
             });
           }
 
-          if (event.type === "result") {
+          if (event.type === 'result') {
             finalResult = event.result;
           }
         } catch {
@@ -707,31 +618,31 @@ export class AmpClient {
         }
       };
 
-      proc.stdout?.on("data", (chunk: Buffer) => {
+      proc.stdout?.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
         stdout += text;
         options.onStdout?.(text);
 
         lineBuffer += text;
-        const lines = lineBuffer.split("\n");
-        lineBuffer = lines.pop() ?? "";
+        const lines = lineBuffer.split('\n');
+        lineBuffer = lines.pop() ?? '';
         for (const line of lines) {
           processLine(line);
         }
       });
 
-      proc.stderr?.on("data", (chunk: Buffer) => {
+      proc.stderr?.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
         stderr += text;
         options.onStderr?.(text);
       });
 
-      proc.on("error", (error) => {
+      proc.on('error', (error) => {
         if (timeout) clearTimeout(timeout);
         reject(error);
       });
 
-      proc.on("close", (code) => {
+      proc.on('close', (code) => {
         if (timeout) clearTimeout(timeout);
 
         if (lineBuffer.trim()) {
@@ -764,15 +675,11 @@ export class AmpClient {
 
   private truncate(str: string, maxLength: number): string {
     if (str.length <= maxLength) return str;
-    return str.slice(0, maxLength) + "... [truncated]";
+    return str.slice(0, maxLength) + '... [truncated]';
   }
 
   private isPlainObject(value: unknown): value is Record<string, unknown> {
-    return (
-      typeof value === "object" &&
-      value !== null &&
-      !Array.isArray(value)
-    );
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 }
 
