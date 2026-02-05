@@ -165,12 +165,13 @@ export class AmpClient {
     return this.tracer.startActiveSpan('gen_ai.capability', async (span: Span) => {
       try {
         span.setAttribute('gen_ai.capability.name', 'amp');
-        span.setAttribute('gen_ai.prompt', this.truncate(prompt, 4000));
-        span.setAttribute('gen_ai.system', 'amp');
+        span.setAttribute('gen_ai.operation.name', 'chat');
+        span.setAttribute('gen_ai.input.messages', this.truncate(prompt, 4000));
+        span.setAttribute('gen_ai.provider.name', 'amp');
 
         const result = await this.spawnAmp(prompt, options, span);
 
-        span.setAttribute('gen_ai.session.id', result.sessionId ?? 'unknown');
+        span.setAttribute('gen_ai.conversation.id', result.sessionId ?? 'unknown');
         span.setAttribute('gen_ai.usage.input_tokens', result.usage.inputTokens);
         span.setAttribute('gen_ai.usage.output_tokens', result.usage.outputTokens);
         span.setAttribute('gen_ai.usage.cache_read_tokens', result.usage.cacheReadInputTokens);
@@ -178,7 +179,7 @@ export class AmpClient {
         span.setAttribute('amp.exit_code', result.exitCode);
 
         if (result.finalResult) {
-          span.setAttribute('gen_ai.completion', this.truncate(result.finalResult, 4000));
+          span.setAttribute('gen_ai.output.messages', this.truncate(result.finalResult, 4000));
         }
 
         if (result.exitCode !== 0 || result.events.some(e => e.type === 'result' && e.is_error)) {
@@ -235,6 +236,7 @@ export class AmpClient {
         { startTime: llm.startTime },
         parentContext
       );
+      llmSpan.setAttribute('gen_ai.operation.name', 'chat');
       llmSpan.setAttribute('gen_ai.step.index', llm.index);
       llmSpan.setAttribute('gen_ai.request.model', modelName);
       llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
@@ -249,7 +251,7 @@ export class AmpClient {
       // Add completion content from the assistant event
       if (assistantEvent) {
         const completion = JSON.stringify(assistantEvent.message.content);
-        llmSpan.setAttribute('gen_ai.completion', this.truncate(completion, 4000));
+        llmSpan.setAttribute('gen_ai.output.messages', this.truncate(completion, 4000));
       }
 
       llmSpan.setStatus({ code: SpanStatusCode.OK });
@@ -265,11 +267,12 @@ export class AmpClient {
         parentContext
       );
 
+      toolSpan.setAttribute('gen_ai.operation.name', 'execute_tool');
       toolSpan.setAttribute('gen_ai.tool.name', tool.name);
-      toolSpan.setAttribute('gen_ai.tool.arguments', JSON.stringify(tool.input).slice(0, 4000));
+      toolSpan.setAttribute('gen_ai.tool.call.arguments', JSON.stringify(tool.input).slice(0, 4000));
 
       if (tool.result !== undefined) {
-        toolSpan.setAttribute('gen_ai.tool.message', this.truncate(tool.result, 4000));
+        toolSpan.setAttribute('gen_ai.tool.call.result', this.truncate(tool.result, 4000));
       }
 
       if (tool.isError) {
@@ -603,12 +606,13 @@ export class AmpClient {
           parentContext
         );
 
+        internalSpan.setAttribute('gen_ai.operation.name', 'chat');
         internalSpan.setAttribute('gen_ai.request.model', call.model);
-        internalSpan.setAttribute('gen_ai.system', call.toolName);
+        internalSpan.setAttribute('gen_ai.provider.name', call.toolName);
         internalSpan.setAttribute('gen_ai.internal', true); // Mark as scraped from logs
 
         if (call.task) {
-          internalSpan.setAttribute('gen_ai.prompt', this.truncate(call.task, 4000));
+          internalSpan.setAttribute('gen_ai.input.messages', this.truncate(call.task, 4000));
         }
         if (call.reasoningEffort) {
           internalSpan.setAttribute('gen_ai.reasoning_effort', call.reasoningEffort);
