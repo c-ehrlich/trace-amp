@@ -131,24 +131,23 @@ export class AmpClient {
    * Uses --stream-json to get structured output.
    */
   async invoke(prompt: string, options: AmpInvokeOptions = {}): Promise<AmpResult> {
-    return this.tracer.startActiveSpan('amp.invoke', async (span: Span) => {
+    return this.tracer.startActiveSpan('gen_ai.capability', async (span: Span) => {
       try {
-        span.setAttribute('amp.prompt', this.truncate(prompt, 2000));
-        span.setAttribute('amp.prompt_length', prompt.length);
+        span.setAttribute('gen_ai.capability.name', 'amp');
+        span.setAttribute('gen_ai.prompt', this.truncate(prompt, 4000));
+        span.setAttribute('gen_ai.system', 'amp');
 
         const result = await this.spawnAmp(prompt, options, span);
 
+        span.setAttribute('gen_ai.session.id', result.sessionId ?? 'unknown');
+        span.setAttribute('gen_ai.usage.input_tokens', result.usage.inputTokens);
+        span.setAttribute('gen_ai.usage.output_tokens', result.usage.outputTokens);
+        span.setAttribute('gen_ai.usage.cache_read_tokens', result.usage.cacheReadInputTokens);
+        span.setAttribute('gen_ai.usage.cache_creation_tokens', result.usage.cacheCreationInputTokens);
         span.setAttribute('amp.exit_code', result.exitCode);
-        span.setAttribute('amp.duration_ms', result.durationMs);
-        span.setAttribute('amp.session_id', result.sessionId ?? 'unknown');
-        span.setAttribute('amp.tool_calls_count', result.toolCalls.length);
-        span.setAttribute('amp.input_tokens', result.usage.inputTokens);
-        span.setAttribute('amp.output_tokens', result.usage.outputTokens);
-        span.setAttribute('amp.cache_read_tokens', result.usage.cacheReadInputTokens);
-        span.setAttribute('amp.cache_creation_tokens', result.usage.cacheCreationInputTokens);
 
         if (result.finalResult) {
-          span.setAttribute('amp.response', this.truncate(result.finalResult, 4000));
+          span.setAttribute('gen_ai.completion', this.truncate(result.finalResult, 4000));
         }
 
         if (result.exitCode !== 0 || result.events.some(e => e.type === 'result' && e.is_error)) {
@@ -161,7 +160,7 @@ export class AmpClient {
         }
 
         // Create child spans for each LLM call and tool call
-        this.createLlmCallSpans(result.llmCalls, span);
+        this.createLlmCallSpans(result.llmCalls, result.events, span);
         this.createToolCallSpans(result.toolCalls, span);
 
         return result;
@@ -178,26 +177,38 @@ export class AmpClient {
     });
   }
 
-  private createLlmCallSpans(llmCalls: LlmCallInfo[], parentSpan: Span): void {
+  private createLlmCallSpans(llmCalls: LlmCallInfo[], events: AmpEvent[], parentSpan: Span): void {
     const parentContext = trace.setSpan(context.active(), parentSpan);
 
-    for (const llm of llmCalls) {
+    // Extract assistant events to get prompts and completions
+    const assistantEvents = events.filter((e): e is AmpAssistantEvent => e.type === 'assistant');
+
+    for (let i = 0; i < llmCalls.length; i++) {
+      const llm = llmCalls[i];
+      const assistantEvent = assistantEvents[i];
+
       const llmSpan = this.tracer.startSpan(
-        'amp.llm',
+        'gen_ai.step',
         { startTime: llm.startTime },
         parentContext
       );
 
-      llmSpan.setAttribute('llm.index', llm.index);
-      llmSpan.setAttribute('llm.stop_reason', llm.stopReason);
-      llmSpan.setAttribute('llm.input_tokens', llm.inputTokens);
-      llmSpan.setAttribute('llm.output_tokens', llm.outputTokens);
-      llmSpan.setAttribute('llm.cache_read_tokens', llm.cacheReadInputTokens);
-      llmSpan.setAttribute('llm.cache_creation_tokens', llm.cacheCreationInputTokens);
-      llmSpan.setAttribute('llm.total_tokens', llm.inputTokens + llm.outputTokens);
+      llmSpan.setAttribute('gen_ai.step.name', `llm_call_${llm.index}`);
+      llmSpan.setAttribute('gen_ai.step.index', llm.index);
+      llmSpan.setAttribute('gen_ai.request.model', 'claude'); // Amp uses Claude
+      llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
+      llmSpan.setAttribute('gen_ai.usage.output_tokens', llm.outputTokens);
+      llmSpan.setAttribute('gen_ai.usage.cache_read_tokens', llm.cacheReadInputTokens);
+      llmSpan.setAttribute('gen_ai.usage.cache_creation_tokens', llm.cacheCreationInputTokens);
 
-      if (llm.toolCalls.length > 0) {
-        llmSpan.setAttribute('llm.tool_calls', llm.toolCalls.join(', '));
+      // Map stop reason to gen_ai finish reason
+      const finishReason = llm.stopReason === 'tool_use' ? 'tool-calls' : 'stop';
+      llmSpan.setAttribute('gen_ai.response.finish_reasons', finishReason);
+
+      // Add completion content from the assistant event
+      if (assistantEvent) {
+        const completion = JSON.stringify(assistantEvent.message.content);
+        llmSpan.setAttribute('gen_ai.completion', this.truncate(completion, 4000));
       }
 
       llmSpan.setStatus({ code: SpanStatusCode.OK });
@@ -210,18 +221,16 @@ export class AmpClient {
 
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(
-        `amp.tool.${tool.name}`,
+        'gen_ai.tool',
         { startTime: tool.startTime },
         parentContext
       );
 
-      toolSpan.setAttribute('tool.id', tool.id);
-      toolSpan.setAttribute('tool.name', tool.name);
-      toolSpan.setAttribute('tool.input', JSON.stringify(tool.input).slice(0, 1000));
+      toolSpan.setAttribute('gen_ai.tool.name', tool.name);
+      toolSpan.setAttribute('gen_ai.tool.arguments', JSON.stringify(tool.input).slice(0, 4000));
 
       if (tool.result !== undefined) {
-        toolSpan.setAttribute('tool.result_length', tool.result.length);
-        toolSpan.setAttribute('tool.result', this.truncate(tool.result, 1000));
+        toolSpan.setAttribute('gen_ai.tool.message', this.truncate(tool.result, 4000));
       }
 
       if (tool.isError) {
