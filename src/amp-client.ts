@@ -212,12 +212,17 @@ export class AmpClient {
 
         // Enrich result with captured LLM calls
         const enrichedLlmCalls = this.enrichLlmCalls(result.llmCalls, capturedCalls);
+        
+        // Separate main agent LLM calls from internal tool LLM calls
+        const mainLlmCalls = enrichedLlmCalls.filter((c) => !c.isInternal);
+        const internalLlmCalls = enrichedLlmCalls.filter((c) => c.isInternal);
 
         const parentContext = trace.setSpan(context.active(), span);
 
-        // Create child spans for LLM calls (including internal ones from proxy)
-        this.createLlmCallSpans(enrichedLlmCalls, result.events, parentContext);
-        this.createToolCallSpans(result.toolCalls, parentContext);
+        // Create child spans for main LLM calls
+        this.createLlmCallSpans(mainLlmCalls, result.events, parentContext);
+        // Create tool spans with internal LLM calls nested inside
+        this.createToolCallSpans(result.toolCalls, internalLlmCalls, parentContext);
 
         return { ...result, llmCalls: enrichedLlmCalls };
       } catch (error) {
@@ -349,7 +354,11 @@ export class AmpClient {
     }
   }
 
-  private createToolCallSpans(toolCalls: ToolCallInfo[], parentContext: Context): void {
+  private createToolCallSpans(
+    toolCalls: ToolCallInfo[],
+    internalLlmCalls: LlmCallInfo[],
+    parentContext: Context
+  ): void {
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(`execute_tool ${tool.name}`, { startTime: tool.startTime }, parentContext);
 
@@ -367,8 +376,48 @@ export class AmpClient {
         toolSpan.setStatus({ code: SpanStatusCode.OK });
       }
 
-      toolSpan.end(tool.endTime ?? Date.now());
+      // Find internal LLM calls that happened during this tool's execution
+      const toolEnd = tool.endTime ?? Date.now();
+      const childLlmCalls = internalLlmCalls.filter(
+        (llm) => llm.startTime >= tool.startTime && llm.endTime <= toolEnd
+      );
+
+      // Create child LLM spans under this tool span
+      if (childLlmCalls.length > 0) {
+        const toolContext = trace.setSpan(parentContext, toolSpan);
+        for (const llm of childLlmCalls) {
+          this.createInternalLlmSpan(llm, toolContext);
+        }
+      }
+
+      toolSpan.end(toolEnd);
     }
+  }
+
+  private createInternalLlmSpan(llm: LlmCallInfo, parentContext: Context): void {
+    const llmSpan = this.tracer.startSpan(`chat ${llm.model}`, { startTime: llm.startTime }, parentContext);
+
+    llmSpan.setAttribute('gen_ai.operation.name', 'chat');
+    llmSpan.setAttribute('gen_ai.request.model', llm.model);
+    llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
+    llmSpan.setAttribute('gen_ai.usage.output_tokens', llm.outputTokens);
+    llmSpan.setAttribute('gen_ai.usage.cache_read_tokens', llm.cacheReadInputTokens);
+    llmSpan.setAttribute('gen_ai.usage.cache_creation_tokens', llm.cacheCreationInputTokens);
+    llmSpan.setAttribute('gen_ai.internal', true);
+
+    if (llm.providerPath) {
+      llmSpan.setAttribute('gen_ai.provider_path', llm.providerPath);
+    }
+
+    const finishReason = llm.stopReason === 'tool_use' ? 'tool-calls' : 'stop';
+    llmSpan.setAttribute('gen_ai.response.finish_reasons', finishReason);
+
+    if (llm.toolCalls.length > 0) {
+      llmSpan.setAttribute('gen_ai.tool_calls', llm.toolCalls.join(', '));
+    }
+
+    llmSpan.setStatus({ code: SpanStatusCode.OK });
+    llmSpan.end(llm.endTime);
   }
 
   private spawnAmp(
