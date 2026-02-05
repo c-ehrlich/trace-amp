@@ -415,13 +415,13 @@ export class AmpClient {
       toolSpan.setAttribute("gen_ai.operation.name", "execute_tool");
       toolSpan.setAttribute("gen_ai.tool.name", tool.name);
       toolSpan.setAttribute(
-        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.arguments",
         JSON.stringify(tool.input).slice(0, 4000),
       );
 
       if (tool.result !== undefined) {
         toolSpan.setAttribute(
-          "gen_ai.tool.call.result",
+          "gen_ai.tool.message",
           this.truncate(tool.result, 4000),
         );
       }
