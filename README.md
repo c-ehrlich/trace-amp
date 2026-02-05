@@ -1,4 +1,4 @@
-# instrument-amp
+# trace-amp
 
 OpenTelemetry instrumentation for [Amp](https://ampcode.com) CLI.
 
