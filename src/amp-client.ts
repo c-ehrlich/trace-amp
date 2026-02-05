@@ -278,17 +278,75 @@ export class AmpClient {
     modelName: string,
     parentContext: Context,
   ): void {
-    // Extract user and assistant events to get prompts and completions
-    const userEvents = events.filter(
-      (e): e is AmpUserEvent => e.type === "user",
-    );
+    // Build conversation history incrementally for each LLM call
+    // Each call sees all messages up to that point
+    const conversationMessages: Array<{
+      role: string;
+      content: AmpContentBlock[];
+    }> = [];
+
+    // Track which assistant event corresponds to each LLM call
+    let assistantEventIndex = 0;
     const assistantEvents = events.filter(
       (e): e is AmpAssistantEvent => e.type === "assistant",
     );
 
     for (let i = 0; i < llmCalls.length; i++) {
       const llm = llmCalls[i];
-      const userEvent = userEvents[i];
+
+      // Add all events that occurred before this LLM call to the conversation
+      // For the first call, we need user messages; for subsequent calls, we also include
+      // the previous assistant response and any tool results
+      if (i === 0) {
+        // First call: gather all user events that precede the first assistant response
+        for (const event of events) {
+          if (event.type === "user") {
+            conversationMessages.push({
+              role: "user",
+              content: event.message.content,
+            });
+          } else if (event.type === "assistant") {
+            break; // Stop at first assistant response
+          }
+        }
+      } else {
+        // Subsequent calls: add the previous assistant response and any tool results
+        const prevAssistant = assistantEvents[i - 1];
+        if (prevAssistant) {
+          conversationMessages.push({
+            role: "assistant",
+            content: prevAssistant.message.content,
+          });
+
+          // Find tool results that follow this assistant message
+          // Tool results appear as user events with tool_result content
+          for (const event of events) {
+            if (event.type === "user") {
+              const hasToolResults = event.message.content.some(
+                (block) => block.type === "tool_result",
+              );
+              if (hasToolResults) {
+                // Check if this tool result is for a tool_use in the previous assistant message
+                const toolUseIds = prevAssistant.message.content
+                  .filter((block) => block.type === "tool_use")
+                  .map((block) => (block as { id: string }).id);
+                const resultIds = event.message.content
+                  .filter((block) => block.type === "tool_result")
+                  .map(
+                    (block) => (block as { tool_use_id: string }).tool_use_id,
+                  );
+                if (resultIds.some((id) => toolUseIds.includes(id))) {
+                  conversationMessages.push({
+                    role: "user",
+                    content: event.message.content,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
       const assistantEvent = assistantEvents[i];
 
       const llmSpan = this.tracer.startSpan(
@@ -315,9 +373,9 @@ export class AmpClient {
         llm.stopReason === "tool_use" ? "tool-calls" : "stop";
       llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
 
-      // Add input content from the user event
-      if (userEvent) {
-        const input = JSON.stringify(userEvent.message.content);
+      // Add full conversation history as input
+      if (conversationMessages.length > 0) {
+        const input = JSON.stringify(conversationMessages);
         llmSpan.setAttribute(
           "gen_ai.input.messages",
           this.truncate(input, 4000),
