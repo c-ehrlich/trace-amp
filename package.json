@@ -5,14 +5,16 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/example.js",
-    "dev": "tsx src/example.ts"
+    "dev": "tsx src/example.ts",
+    "wrapped-amp": "tsx src/cli.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
     "@opentelemetry/resources": "^1.30.0",
     "@opentelemetry/sdk-trace-node": "^1.30.0",
-    "@opentelemetry/semantic-conventions": "^1.28.0"
+    "@opentelemetry/semantic-conventions": "^1.28.0",
+    "dotenv": "^17.2.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

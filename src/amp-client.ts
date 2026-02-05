@@ -1,4 +1,8 @@
 import { spawn, ChildProcess } from 'child_process';
+import { readFile, unlink } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
 import { Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
 import { getTracer } from './tracing.js';
 
@@ -121,6 +125,33 @@ export interface LlmCallInfo {
 }
 
 /**
+ * Internal LLM call extracted from debug logs (Oracle, etc.)
+ * These are scraped from log files since they're not in stream-json
+ */
+export interface InternalLlmCall {
+  model: string;
+  toolName: string;  // which tool made this call (oracle, finder, etc.)
+  task?: string;
+  reasoningEffort?: string;
+  messageCount?: number;
+  toolCount?: number;
+  toolCallCount?: number;
+}
+
+/**
+ * Debug log info extracted via BAD_HACK
+ */
+interface DebugLogInfo {
+  mainModel: string | null;
+  internalCalls: InternalLlmCall[];
+}
+
+/** Internal result from spawnAmp including the log file path for BAD_HACK parsing */
+interface SpawnAmpResult extends AmpResult {
+  logFile: string;
+}
+
+/**
  * Instrumented Amp CLI client that emits OpenTelemetry traces
  */
 export class AmpClient {
@@ -159,11 +190,21 @@ export class AmpClient {
           span.setStatus({ code: SpanStatusCode.OK });
         }
 
+        // BAD HACK: Parse debug logs for model name and internal LLM calls (Oracle, etc.)
+        const debugInfo = await this.BAD_HACK__parseDebugLog(result.logFile);
+        const modelName = debugInfo.mainModel ?? 'claude';
+
         // Create child spans for each LLM call and tool call
-        this.createLlmCallSpans(result.llmCalls, result.events, span);
+        this.createLlmCallSpans(result.llmCalls, result.events, modelName, span);
         this.createToolCallSpans(result.toolCalls, span);
 
-        return result;
+        if (debugInfo.internalCalls.length > 0) {
+          this.BAD_HACK__createInternalLlmCallSpans(debugInfo.internalCalls, result.toolCalls, span);
+        }
+
+        // Return without the logFile property (it's internal)
+        const { logFile: _, ...publicResult } = result;
+        return publicResult;
       } catch (error) {
         span.setStatus({
           code: SpanStatusCode.ERROR,
@@ -177,7 +218,7 @@ export class AmpClient {
     });
   }
 
-  private createLlmCallSpans(llmCalls: LlmCallInfo[], events: AmpEvent[], parentSpan: Span): void {
+  private createLlmCallSpans(llmCalls: LlmCallInfo[], events: AmpEvent[], modelName: string, parentSpan: Span): void {
     const parentContext = trace.setSpan(context.active(), parentSpan);
 
     // Extract assistant events to get prompts and completions
@@ -188,14 +229,12 @@ export class AmpClient {
       const assistantEvent = assistantEvents[i];
 
       const llmSpan = this.tracer.startSpan(
-        'gen_ai.step',
+        `chat ${modelName}`,
         { startTime: llm.startTime },
         parentContext
       );
-
-      llmSpan.setAttribute('gen_ai.step.name', `llm_call_${llm.index}`);
       llmSpan.setAttribute('gen_ai.step.index', llm.index);
-      llmSpan.setAttribute('gen_ai.request.model', 'claude'); // Amp uses Claude
+      llmSpan.setAttribute('gen_ai.request.model', modelName);
       llmSpan.setAttribute('gen_ai.usage.input_tokens', llm.inputTokens);
       llmSpan.setAttribute('gen_ai.usage.output_tokens', llm.outputTokens);
       llmSpan.setAttribute('gen_ai.usage.cache_read_tokens', llm.cacheReadInputTokens);
@@ -221,7 +260,7 @@ export class AmpClient {
 
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(
-        'gen_ai.tool',
+        `execute_tool ${tool.name}`,
         { startTime: tool.startTime },
         parentContext
       );
@@ -247,10 +286,11 @@ export class AmpClient {
     prompt: string,
     options: AmpInvokeOptions,
     parentSpan: Span
-  ): Promise<AmpResult> {
+  ): Promise<SpawnAmpResult> {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
-      const args = ['-x', '--stream-json'];
+      const logFile = join(tmpdir(), `amp-debug-${randomUUID()}.log`);
+      const args = ['-x', '--stream-json', '--log-level', 'debug', '--log-file', logFile];
 
       const proc: ChildProcess = spawn('amp', args, {
         cwd: options.cwd,
@@ -415,6 +455,7 @@ export class AmpClient {
           llmCalls,
           usage,
           finalResult,
+          logFile,
         });
       });
 
@@ -427,6 +468,166 @@ export class AmpClient {
   private truncate(str: string, maxLength: number): string {
     if (str.length <= maxLength) return str;
     return str.slice(0, maxLength) + '... [truncated]';
+  }
+
+  /**
+   * BAD HACK: Parse debug log file to extract internal LLM calls from tools like Oracle.
+   * 
+   * This is necessary because Amp's --stream-json doesn't expose internal LLM calls
+   * made by subagents (Oracle, Task, Librarian, etc.). We scrape the debug log file
+   * to get partial visibility into these calls.
+   * 
+   * Limitations:
+   * - No precise timing (we fake it by spacing calls evenly within parent tool span)
+   * - No token counts
+   * - No prompt/completion content
+   * - Fragile: depends on log format which may change
+   */
+  private async BAD_HACK__parseDebugLog(
+    logFile: string
+  ): Promise<DebugLogInfo> {
+    const result: DebugLogInfo = {
+      mainModel: null,
+      internalCalls: [],
+    };
+
+    try {
+      const content = await readFile(logFile, 'utf-8');
+      const lines = content.split('\n').filter(Boolean);
+
+      let currentToolName = 'unknown';
+
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+
+          // Extract the main model from inference start
+          if (entry.message === 'runInferenceAndUpdateThread: starting inference' && entry.selectedModel) {
+            // selectedModel is like "anthropic/claude-opus-4-5-20251101"
+            result.mainModel = entry.selectedModel.replace('anthropic/', '');
+          }
+
+          // Track which tool is being invoked
+          if (entry.message === 'Oracle starting consultation:') {
+            currentToolName = 'oracle';
+            result.internalCalls.push({
+              model: entry.model ?? 'gpt-5.2',
+              toolName: currentToolName,
+              task: entry.task,
+              reasoningEffort: entry.reasoningEffort,
+            });
+          }
+
+          // OpenAI scaffold requests (Oracle uses this)
+          if (entry.message === 'OpenAI scaffold making request:') {
+            // Update the last call with additional info
+            const lastCall = result.internalCalls[result.internalCalls.length - 1];
+            if (lastCall && lastCall.toolName === currentToolName) {
+              lastCall.messageCount = entry.messageCount;
+              lastCall.toolCount = entry.toolCount;
+            }
+          }
+
+          // OpenAI scaffold completion
+          if (entry.message === 'OpenAI scaffold completed:') {
+            const lastCall = result.internalCalls[result.internalCalls.length - 1];
+            if (lastCall && lastCall.toolName === currentToolName) {
+              lastCall.toolCallCount = entry.toolCallCount;
+            }
+          }
+
+          // Could add more patterns here for Task, Librarian, finder, etc.
+
+        } catch {
+          // Not valid JSON, skip
+        }
+      }
+    } catch (error) {
+      // Log file doesn't exist or can't be read - that's fine
+    }
+
+    // Clean up the log file
+    try {
+      await unlink(logFile);
+    } catch {
+      // Ignore cleanup errors
+    }
+
+    return result;
+  }
+
+  /**
+   * BAD HACK: Create spans for internal LLM calls extracted from debug logs.
+   * 
+   * Since we don't have actual timing, we space the calls evenly within the
+   * parent tool span's duration.
+   */
+  private BAD_HACK__createInternalLlmCallSpans(
+    internalCalls: InternalLlmCall[],
+    toolCalls: ToolCallInfo[],
+    parentSpan: Span
+  ): void {
+    const parentContext = trace.setSpan(context.active(), parentSpan);
+
+    // Group internal calls by their parent tool
+    const callsByTool = new Map<string, InternalLlmCall[]>();
+    for (const call of internalCalls) {
+      const existing = callsByTool.get(call.toolName) ?? [];
+      existing.push(call);
+      callsByTool.set(call.toolName, existing);
+    }
+
+    // For each tool that has internal calls, space them evenly within the tool's duration
+    for (const tool of toolCalls) {
+      const toolNameLower = tool.name.toLowerCase();
+      const internalForTool = callsByTool.get(toolNameLower);
+
+      if (!internalForTool || internalForTool.length === 0) continue;
+
+      const toolStart = tool.startTime;
+      const toolEnd = tool.endTime ?? Date.now();
+      const toolDuration = toolEnd - toolStart;
+
+      // Space calls evenly, leaving some margin at start and end
+      const margin = toolDuration * 0.1; // 10% margin
+      const availableDuration = toolDuration - 2 * margin;
+      const callDuration = availableDuration / internalForTool.length;
+
+      for (let i = 0; i < internalForTool.length; i++) {
+        const call = internalForTool[i];
+        const fakeStartTime = toolStart + margin + i * callDuration;
+        const fakeEndTime = fakeStartTime + callDuration * 0.9; // 90% of slot
+
+        const internalSpan = this.tracer.startSpan(
+          `chat ${call.model}`,
+          { startTime: fakeStartTime },
+          parentContext
+        );
+
+        internalSpan.setAttribute('gen_ai.request.model', call.model);
+        internalSpan.setAttribute('gen_ai.system', call.toolName);
+        internalSpan.setAttribute('gen_ai.internal', true); // Mark as scraped from logs
+
+        if (call.task) {
+          internalSpan.setAttribute('gen_ai.prompt', this.truncate(call.task, 4000));
+        }
+        if (call.reasoningEffort) {
+          internalSpan.setAttribute('gen_ai.reasoning_effort', call.reasoningEffort);
+        }
+        if (call.messageCount !== undefined) {
+          internalSpan.setAttribute('gen_ai.message_count', call.messageCount);
+        }
+        if (call.toolCount !== undefined) {
+          internalSpan.setAttribute('gen_ai.available_tools', call.toolCount);
+        }
+        if (call.toolCallCount !== undefined) {
+          internalSpan.setAttribute('gen_ai.tool_calls_made', call.toolCallCount);
+        }
+
+        internalSpan.setStatus({ code: SpanStatusCode.OK });
+        internalSpan.end(fakeEndTime);
+      }
+    }
   }
 }
 

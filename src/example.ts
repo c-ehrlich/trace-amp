@@ -12,9 +12,9 @@ async function main() {
   const amp = createAmpClient();
 
   try {
-    // Example: Invoke with tool use
-    console.log('Invoking Amp...\n');
-    const result = await amp.invoke('Read the package.json file and tell me the project name', {
+    // Example: Invoke with Oracle to test internal LLM call extraction
+    console.log('Invoking Amp with Oracle...\n');
+    const result = await amp.invoke('Use the oracle to tell me what 2+2 is', {
       timeout: 60_000,
       onEvent: (event) => {
         if (event.type === 'assistant') {
@@ -44,6 +44,7 @@ async function main() {
     console.log(`Total tokens: ${result.usage.inputTokens} in, ${result.usage.outputTokens} out`);
     console.log(`Cache: ${result.usage.cacheReadInputTokens} read, ${result.usage.cacheCreationInputTokens} created`);
     console.log(`Result: ${result.finalResult}`);
+    console.log('\n(Internal LLM calls from Oracle are captured as gen_ai.step.internal spans)');
 
   } catch (error) {
     console.error('Error:', error);

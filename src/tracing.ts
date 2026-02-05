@@ -9,8 +9,10 @@ import { ReadableSpan, SpanProcessor } from '@opentelemetry/sdk-trace-base';
 export interface TracingConfig {
   serviceName: string;
   serviceVersion?: string;
-  /** OTLP endpoint, defaults to http://localhost:4318/v1/traces */
-  otlpEndpoint?: string;
+  /** OTLP endpoint */
+  otlpEndpoint: string;
+  /** OTLP headers for authentication (e.g., API keys) */
+  otlpHeaders?: Record<string, string>;
 }
 
 let provider: NodeTracerProvider | null = null;
@@ -60,7 +62,8 @@ export function initTracing(config: TracingConfig): void {
   provider = new NodeTracerProvider({ resource });
 
   const exporter = new OTLPTraceExporter({
-    url: config.otlpEndpoint ?? 'http://localhost:4318/v1/traces',
+    url: config.otlpEndpoint,
+    headers: config.otlpHeaders,
   });
 
   const batchProcessor = new BatchSpanProcessor(exporter);
