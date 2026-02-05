@@ -65,6 +65,10 @@ export class LlmProxy extends EventEmitter {
   constructor(options: LlmProxyOptions = {}) {
     super();
     this.port = options.port ?? 0; // 0 = random available port
+    
+    // Suppress library noise before creating proxy (it logs during construction)
+    this.suppressLibraryNoise();
+    
     this.proxy = new Proxy();
 
     if (options.sslCaDir) {
@@ -373,8 +377,64 @@ export class LlmProxy extends EventEmitter {
   async stop(): Promise<void> {
     return new Promise((resolve) => {
       this.proxy.close();
+      this.restoreConsole();
       resolve();
     });
+  }
+  
+  private originalConsoleDebug: typeof console.debug | null = null;
+  private originalConsoleLog: typeof console.log | null = null;
+  private originalConsoleError: typeof console.error | null = null;
+
+  private suppressLibraryNoise(): void {
+    this.originalConsoleDebug = console.debug;
+    this.originalConsoleLog = console.log;
+    this.originalConsoleError = console.error;
+    
+    const isProxyNoise = (msg: string): boolean => {
+      return (
+        msg.includes('ECONNRESET') ||
+        msg.includes('server started') ||
+        msg.includes('starting server') ||
+        msg.includes('Socket error') ||
+        msg.includes('Connection error') ||
+        msg.includes('HTTPS_CLIENT_ERROR') ||
+        msg.includes('Error getting HTTPs')
+      );
+    };
+    
+    console.debug = (...args: any[]) => {
+      if (isProxyNoise(String(args[0] ?? ''))) return;
+      this.originalConsoleDebug?.apply(console, args);
+    };
+    
+    console.log = (...args: any[]) => {
+      if (isProxyNoise(String(args[0] ?? ''))) return;
+      this.originalConsoleLog?.apply(console, args);
+    };
+    
+    console.error = (...args: any[]) => {
+      const msg = String(args[0] ?? '');
+      // Filter proxy errors but allow the Error object if it's not ECONNRESET
+      if (isProxyNoise(msg)) return;
+      if (args[0] instanceof Error && isProxyNoise(args[0].message)) return;
+      this.originalConsoleError?.apply(console, args);
+    };
+  }
+
+  private restoreConsole(): void {
+    if (this.originalConsoleDebug) {
+      console.debug = this.originalConsoleDebug;
+      this.originalConsoleDebug = null;
+    }
+    if (this.originalConsoleLog) {
+      console.log = this.originalConsoleLog;
+      this.originalConsoleLog = null;
+    }
+    if (this.originalConsoleError) {
+      console.error = this.originalConsoleError;
+      this.originalConsoleError = null;
+    }
   }
 
   getPort(): number {
