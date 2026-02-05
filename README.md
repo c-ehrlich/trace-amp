@@ -2,6 +2,10 @@
 
 OpenTelemetry instrumentation for [Amp](https://ampcode.com) CLI.
 
+![Amp trace in Axiom](https://github-production-user-asset-6210df.s3.amazonaws.com/8353666/545447024-800a9a84-7251-462b-b1bd-9b6ab9dcd24c.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20260205%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260205T081953Z&X-Amz-Expires=300&X-Amz-Signature=1e910a5938446c4f51e7f9e72c0a84241992a9d4c502a28ac733693452735209&X-Amz-SignedHeaders=host)
+
+Fully vibe coded, use at your own risk.
+
 ## Setup
 
 ```bash
