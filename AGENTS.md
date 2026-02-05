@@ -1,0 +1,1 @@
+- if you want to run the cli to test your changes, you don't need to build etc. just do `pnpm wrapped-amp "ask the oracle to add 2+2"` or whatever prompt you are testing.
