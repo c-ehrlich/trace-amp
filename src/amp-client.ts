@@ -493,10 +493,7 @@ export class AmpClient {
         internalSpan.setAttribute("gen_ai.available_tools", call.toolCount);
       }
       if (call.toolCallCount !== undefined) {
-        internalSpan.setAttribute(
-          "gen_ai.tool_calls_made",
-          call.toolCallCount,
-        );
+        internalSpan.setAttribute("gen_ai.tool_calls_made", call.toolCallCount);
       }
 
       internalSpan.setStatus({ code: SpanStatusCode.OK });
