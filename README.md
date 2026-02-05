@@ -2,64 +2,40 @@
 
 OpenTelemetry instrumentation for [Amp](https://ampcode.com) CLI.
 
-## Install
+## Setup
 
 ```bash
-npm install
-npm run build
+cp .env.example .env
+# Edit .env with your Axiom API token and dataset
 ```
 
-## Usage
-
-```typescript
-import { initTracing, shutdownTracing, createAmpClient } from './dist/index.js';
-
-// Initialize tracing
-initTracing({
-  serviceName: 'my-amp-agent',
-  otlpEndpoint: 'https://api.axiom.co/v1/traces',
-});
-
-const amp = createAmpClient();
-
-const result = await amp.invoke('What files are in this directory?', {
-  timeout: 60_000,
-});
-
-console.log(result.finalResult);
-
-// Flush traces before exit
-await shutdownTracing();
-```
-
-## Sending to Axiom
-
-Set these environment variables:
+## Quick Start (Development)
 
 ```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.axiom.co/v1/traces
-export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <your-api-token>,X-Axiom-Dataset=<dataset>"
+pnpm wrapped-amp "ask the oracle to add 2+2"
 ```
 
-Or pass the endpoint directly:
+## Build & Run Binary
+
+```bash
+pnpm build
+node dist/cli.js "ask the oracle to add 2+2"
+```
+
+## TypeScript Usage
 
 ```typescript
+import { initTracing, shutdownTracing, createAmpClient } from 'instrument-amp';
+
 initTracing({
   serviceName: 'my-amp-agent',
   otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
 });
-```
 
-## Spans
+const amp = createAmpClient();
+const result = await amp.invoke('What files are in this directory?');
 
-| Span | Description |
-|------|-------------|
-| `gen_ai.capability` | Root span for the Amp invocation |
-| `chat <model>` | LLM calls (e.g., `chat claude-opus-4-5-20251101`, `chat gpt-5.2`) |
-| `execute_tool <name>` | Tool executions (e.g., `execute_tool Read`, `execute_tool oracle`) |
+console.log(result.finalResult);
 
-## Example
-
-```bash
-npm run dev
+await shutdownTracing();
 ```
