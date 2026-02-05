@@ -74,6 +74,7 @@ export class LlmProxy extends EventEmitter {
     this.suppressLibraryNoise();
     
     this.proxy = new Proxy();
+    this.proxy.keepAlive = false;
 
     if (options.sslCaDir) {
       this.proxy.sslCaDir = options.sslCaDir;
