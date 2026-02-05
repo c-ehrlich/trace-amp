@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from "child_process";
 import {
   Span,
   SpanStatusCode,
-  context,
+  context as otelContext,
   trace,
   Context,
 } from "@opentelemetry/api";
@@ -21,6 +21,8 @@ export interface AmpInvokeOptions {
   env?: Record<string, string>;
   /** Timeout in milliseconds */
   timeout?: number;
+  /** Parent OTel context to nest spans under (defaults to active context) */
+  parentContext?: Context;
   /** Callback for each parsed event */
   onEvent?: (event: AmpEvent) => void;
   /** Callback for raw stdout chunks */
@@ -219,8 +221,9 @@ export class AmpClient {
     });
 
     const { port, caPath } = await this.proxy.start();
+    const parentContext = options.parentContext ?? otelContext.active();
 
-    return this.tracer.startActiveSpan("amp", async (span: Span) => {
+    return this.tracer.startActiveSpan("amp", {}, parentContext, async (span: Span) => {
       try {
         span.setAttribute("gen_ai.capability.name", "amp");
         span.setAttribute("gen_ai.input.messages", this.truncate(prompt, 4000));
@@ -279,15 +282,15 @@ export class AmpClient {
         const mainLlmCalls = enrichedLlmCalls.filter((c) => !c.isInternal);
         const internalLlmCalls = enrichedLlmCalls.filter((c) => c.isInternal);
 
-        const parentContext = trace.setSpan(context.active(), span);
+        const spanContext = trace.setSpan(otelContext.active(), span);
 
         // Create child spans for main LLM calls
-        this.createLlmCallSpans(mainLlmCalls, result.events, parentContext);
+        this.createLlmCallSpans(mainLlmCalls, result.events, spanContext);
         // Create tool spans with internal LLM calls nested inside
         this.createToolCallSpans(
           result.toolCalls,
           internalLlmCalls,
-          parentContext,
+          spanContext,
         );
 
         return { ...result, llmCalls: enrichedLlmCalls };
