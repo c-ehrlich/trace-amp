@@ -388,9 +388,12 @@ export class AmpClient {
       }
 
       // Find internal LLM calls that happened during this tool's execution
+      // Use overlapping time ranges with a small tolerance (100ms) since proxy timestamps
+      // may slightly precede stream-json timestamps
       const toolEnd = tool.endTime ?? Date.now();
+      const tolerance = 100;
       const childLlmCalls = internalLlmCalls.filter(
-        (llm) => llm.startTime >= tool.startTime && llm.endTime <= toolEnd
+        (llm) => llm.startTime >= tool.startTime - tolerance && llm.endTime <= toolEnd + tolerance
       );
 
       // Create child LLM spans under this tool span
