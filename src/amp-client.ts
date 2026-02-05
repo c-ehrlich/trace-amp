@@ -244,15 +244,11 @@ export class AmpClient {
           modelName,
           parentContext,
         );
-        this.createToolCallSpans(result.toolCalls, parentContext);
-
-        if (debugInfo.internalCalls.length > 0) {
-          this.BAD_HACK__createInternalLlmCallSpans(
-            debugInfo.internalCalls,
-            result.toolCalls,
-            parentContext,
-          );
-        }
+        this.createToolCallSpans(
+          result.toolCalls,
+          parentContext,
+          debugInfo.internalCalls,
+        );
 
         // Return without the logFile property (it's internal)
         const { logFile: _, ...publicResult } = result;
@@ -399,7 +395,16 @@ export class AmpClient {
   private createToolCallSpans(
     toolCalls: ToolCallInfo[],
     parentContext: Context,
+    internalCalls: InternalLlmCall[] = [],
   ): void {
+    // Group internal calls by their parent tool
+    const callsByTool = new Map<string, InternalLlmCall[]>();
+    for (const call of internalCalls) {
+      const existing = callsByTool.get(call.toolName) ?? [];
+      existing.push(call);
+      callsByTool.set(call.toolName, existing);
+    }
+
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(
         `execute_tool ${tool.name}`,
@@ -427,7 +432,75 @@ export class AmpClient {
         toolSpan.setStatus({ code: SpanStatusCode.OK });
       }
 
+      // Create internal LLM call spans as children of this tool span
+      const toolNameLower = tool.name.toLowerCase();
+      const internalForTool = callsByTool.get(toolNameLower);
+      if (internalForTool && internalForTool.length > 0) {
+        const toolContext = trace.setSpan(parentContext, toolSpan);
+        this.createInternalLlmSpansForTool(internalForTool, tool, toolContext);
+      }
+
       toolSpan.end(tool.endTime ?? Date.now());
+    }
+  }
+
+  private createInternalLlmSpansForTool(
+    internalCalls: InternalLlmCall[],
+    tool: ToolCallInfo,
+    toolContext: Context,
+  ): void {
+    const toolStart = tool.startTime;
+    const toolEnd = tool.endTime ?? Date.now();
+    const toolDuration = toolEnd - toolStart;
+
+    // Space calls evenly, leaving some margin at start and end
+    const margin = toolDuration * 0.1;
+    const availableDuration = toolDuration - 2 * margin;
+    const callDuration = availableDuration / internalCalls.length;
+
+    for (let i = 0; i < internalCalls.length; i++) {
+      const call = internalCalls[i];
+      const fakeStartTime = toolStart + margin + i * callDuration;
+      const fakeEndTime = fakeStartTime + callDuration * 0.9;
+
+      const internalSpan = this.tracer.startSpan(
+        `chat ${call.model}`,
+        { startTime: fakeStartTime },
+        toolContext,
+      );
+
+      internalSpan.setAttribute("gen_ai.operation.name", "chat");
+      internalSpan.setAttribute("gen_ai.request.model", call.model);
+      internalSpan.setAttribute("gen_ai.provider.name", call.toolName);
+      internalSpan.setAttribute("gen_ai.internal", true);
+
+      if (call.task) {
+        internalSpan.setAttribute(
+          "gen_ai.input.messages",
+          this.truncate(call.task, 4000),
+        );
+      }
+      if (call.reasoningEffort) {
+        internalSpan.setAttribute(
+          "gen_ai.reasoning_effort",
+          call.reasoningEffort,
+        );
+      }
+      if (call.messageCount !== undefined) {
+        internalSpan.setAttribute("gen_ai.message_count", call.messageCount);
+      }
+      if (call.toolCount !== undefined) {
+        internalSpan.setAttribute("gen_ai.available_tools", call.toolCount);
+      }
+      if (call.toolCallCount !== undefined) {
+        internalSpan.setAttribute(
+          "gen_ai.tool_calls_made",
+          call.toolCallCount,
+        );
+      }
+
+      internalSpan.setStatus({ code: SpanStatusCode.OK });
+      internalSpan.end(fakeEndTime);
     }
   }
 
@@ -715,88 +788,6 @@ export class AmpClient {
     }
 
     return result;
-  }
-
-  /**
-   * BAD HACK: Create spans for internal LLM calls extracted from debug logs.
-   *
-   * Since we don't have actual timing, we space the calls evenly within the
-   * parent tool span's duration.
-   */
-  private BAD_HACK__createInternalLlmCallSpans(
-    internalCalls: InternalLlmCall[],
-    toolCalls: ToolCallInfo[],
-    parentContext: Context,
-  ): void {
-    // Group internal calls by their parent tool
-    const callsByTool = new Map<string, InternalLlmCall[]>();
-    for (const call of internalCalls) {
-      const existing = callsByTool.get(call.toolName) ?? [];
-      existing.push(call);
-      callsByTool.set(call.toolName, existing);
-    }
-
-    // For each tool that has internal calls, space them evenly within the tool's duration
-    for (const tool of toolCalls) {
-      const toolNameLower = tool.name.toLowerCase();
-      const internalForTool = callsByTool.get(toolNameLower);
-
-      if (!internalForTool || internalForTool.length === 0) continue;
-
-      const toolStart = tool.startTime;
-      const toolEnd = tool.endTime ?? Date.now();
-      const toolDuration = toolEnd - toolStart;
-
-      // Space calls evenly, leaving some margin at start and end
-      const margin = toolDuration * 0.1; // 10% margin
-      const availableDuration = toolDuration - 2 * margin;
-      const callDuration = availableDuration / internalForTool.length;
-
-      for (let i = 0; i < internalForTool.length; i++) {
-        const call = internalForTool[i];
-        const fakeStartTime = toolStart + margin + i * callDuration;
-        const fakeEndTime = fakeStartTime + callDuration * 0.9; // 90% of slot
-
-        const internalSpan = this.tracer.startSpan(
-          `chat ${call.model}`,
-          { startTime: fakeStartTime },
-          parentContext,
-        );
-
-        internalSpan.setAttribute("gen_ai.operation.name", "chat");
-        internalSpan.setAttribute("gen_ai.request.model", call.model);
-        internalSpan.setAttribute("gen_ai.provider.name", call.toolName);
-        internalSpan.setAttribute("gen_ai.internal", true); // Mark as scraped from logs
-
-        if (call.task) {
-          internalSpan.setAttribute(
-            "gen_ai.input.messages",
-            this.truncate(call.task, 4000),
-          );
-        }
-        if (call.reasoningEffort) {
-          internalSpan.setAttribute(
-            "gen_ai.reasoning_effort",
-            call.reasoningEffort,
-          );
-        }
-        if (call.messageCount !== undefined) {
-          internalSpan.setAttribute("gen_ai.message_count", call.messageCount);
-        }
-        if (call.toolCount !== undefined) {
-          internalSpan.setAttribute("gen_ai.available_tools", call.toolCount);
-        }
-        if (call.toolCallCount !== undefined) {
-          internalSpan.setAttribute(
-            "gen_ai.tool_calls_made",
-            call.toolCallCount,
-          );
-        }
-
-        internalSpan.setStatus({ code: SpanStatusCode.OK });
-        internalSpan.end(fakeEndTime);
-      }
-    }
   }
 }
 
