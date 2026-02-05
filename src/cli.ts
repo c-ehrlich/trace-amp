@@ -46,6 +46,9 @@ async function main() {
           }
         }
       },
+      onStderr: (chunk) => {
+        process.stderr.write(chunk);
+      },
     });
 
     console.log(`\n\n--- Telemetry ---`);
@@ -53,7 +56,13 @@ async function main() {
     console.log(`Duration: ${result.durationMs}ms`);
     console.log(`Tokens: ${result.usage.inputTokens} in, ${result.usage.outputTokens} out`);
     console.log(`LLM calls: ${result.llmCalls.length}, Tool calls: ${result.toolCalls.length}`);
-
+    
+    for (const llm of result.llmCalls) {
+      const duration = llm.endTime - llm.startTime;
+      const internal = llm.isInternal ? ' (internal)' : '';
+      console.log(`  - ${llm.model}${internal}: ${duration}ms, ${llm.inputTokens}in/${llm.outputTokens}out, stop=${llm.stopReason}`);
+    }
+    
     process.exitCode = result.exitCode;
   } catch (error) {
     console.error('Error:', error);

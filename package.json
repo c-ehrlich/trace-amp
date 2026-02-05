@@ -1,5 +1,5 @@
 {
-  "name": "instrument-amp",
+  "name": "trace-amp",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
@@ -14,7 +14,8 @@
     "@opentelemetry/resources": "^1.30.0",
     "@opentelemetry/sdk-trace-node": "^1.30.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "http-mitm-proxy": "^1.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

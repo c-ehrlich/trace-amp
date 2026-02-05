@@ -1,8 +1,4 @@
 import { spawn, ChildProcess } from "child_process";
-import { readFile, unlink } from "fs/promises";
-import { tmpdir } from "os";
-import { join } from "path";
-import { randomUUID } from "crypto";
 import {
   Span,
   SpanStatusCode,
@@ -11,6 +7,12 @@ import {
   Context,
 } from "@opentelemetry/api";
 import { getTracer } from "./tracing.js";
+import {
+  LlmProxy,
+  LlmRequestEvent,
+  LlmResponseEvent,
+  LlmProxyEvent,
+} from "./llm-proxy.js";
 
 export interface AmpInvokeOptions {
   /** Working directory for the amp process */
@@ -130,64 +132,101 @@ export interface ToolCallInfo {
 
 export interface LlmCallInfo {
   index: number;
-  stopReason: "end_turn" | "tool_use";
+  model: string;
+  stopReason: "end_turn" | "tool_use" | string;
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number;
   cacheReadInputTokens: number;
   startTime: number;
   endTime: number;
-  toolCalls: string[]; // tool names called in this turn
+  toolCalls: string[];
+  /** Whether this is an internal call (from Oracle, Task, etc.) */
+  isInternal: boolean;
+  /** Provider path for internal calls */
+  providerPath?: string;
+  /** Input messages (for internal calls captured via proxy) */
+  inputMessages?: any[];
+  /** Output content (for internal calls captured via proxy) */
+  outputContent?: any[];
 }
 
 /**
- * Internal LLM call extracted from debug logs (Oracle, etc.)
- * These are scraped from log files since they're not in stream-json
+ * Captured LLM call from proxy (paired request + response)
  */
-export interface InternalLlmCall {
+interface CapturedLlmCall {
+  requestId: string;
+  path: string;
   model: string;
-  toolName: string; // which tool made this call (oracle, finder, etc.)
-  task?: string;
-  reasoningEffort?: string;
-  messageCount?: number;
-  toolCount?: number;
-  toolCallCount?: number;
+  startTime: number;
+  endTime: number;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+  } | null;
+  stopReason: string | null;
+  toolCalls: { name: string; id?: string }[];
+  messageCount: number;
+  toolCount: number;
+  /** Input messages from request */
+  messages?: any[];
+  /** Output content from response */
+  content?: any[];
 }
 
 /**
- * Debug log info extracted via BAD_HACK
- */
-interface DebugLogInfo {
-  mainModel: string | null;
-  internalCalls: InternalLlmCall[];
-}
-
-/** Internal result from spawnAmp including the log file path for BAD_HACK parsing */
-interface SpawnAmpResult extends AmpResult {
-  logFile: string;
-}
-
-/**
- * Instrumented Amp CLI client that emits OpenTelemetry traces
+ * Instrumented Amp CLI client that emits OpenTelemetry traces.
+ * Uses an HTTPS proxy to capture all LLM calls including internal ones.
  */
 export class AmpClient {
   private readonly tracer = getTracer("amp-client");
+  private proxy: LlmProxy | null = null;
 
-  /**
-   * Invoke the Amp CLI with a prompt and collect telemetry.
-   * Uses --stream-json to get structured output.
-   */
   async invoke(
     prompt: string,
     options: AmpInvokeOptions = {},
   ): Promise<AmpResult> {
+    // Start proxy to capture LLM calls
+    this.proxy = new LlmProxy();
+    const capturedCalls: CapturedLlmCall[] = [];
+    const pendingRequests = new Map<string, LlmRequestEvent>();
+
+    this.proxy.on("llm", (event: LlmProxyEvent) => {
+      if (event.type === "request") {
+        pendingRequests.set(event.requestId, event);
+      } else {
+        const req = pendingRequests.get(event.requestId);
+        if (req) {
+          pendingRequests.delete(event.requestId);
+          capturedCalls.push({
+            requestId: event.requestId,
+            path: event.path,
+            model: event.model ?? req.model ?? "unknown",
+            startTime: req.timestamp,
+            endTime: event.timestamp,
+            usage: event.usage,
+            stopReason: event.stopReason,
+            toolCalls: event.toolCalls,
+            messageCount: req.messageCount,
+            toolCount: req.toolCount,
+            messages: req.messages,
+            content: event.content,
+          });
+        }
+      }
+    });
+
+    const { port, caPath } = await this.proxy.start();
+
     return this.tracer.startActiveSpan("amp", async (span: Span) => {
       try {
         span.setAttribute("gen_ai.capability.name", "amp");
         span.setAttribute("gen_ai.input.messages", this.truncate(prompt, 4000));
         span.setAttribute("gen_ai.provider.name", "amp");
 
-        const result = await this.spawnAmp(prompt, options, span);
+        const result = await this.spawnAmp(prompt, options, port, caPath);
 
         span.setAttribute(
           "gen_ai.conversation.id",
@@ -230,29 +269,28 @@ export class AmpClient {
           span.setStatus({ code: SpanStatusCode.OK });
         }
 
-        // BAD HACK: Parse debug logs for model name and internal LLM calls (Oracle, etc.)
-        const debugInfo = await this.BAD_HACK__parseDebugLog(result.logFile);
-        const modelName = debugInfo.mainModel ?? "claude";
+        // Enrich result with captured LLM calls
+        const enrichedLlmCalls = this.enrichLlmCalls(
+          result.llmCalls,
+          capturedCalls,
+        );
 
-        // Explicitly set the span in the context to ensure proper parent-child relationship
+        // Separate main agent LLM calls from internal tool LLM calls
+        const mainLlmCalls = enrichedLlmCalls.filter((c) => !c.isInternal);
+        const internalLlmCalls = enrichedLlmCalls.filter((c) => c.isInternal);
+
         const parentContext = trace.setSpan(context.active(), span);
 
-        // Create child spans for each LLM call and tool call
-        this.createLlmCallSpans(
-          result.llmCalls,
-          result.events,
-          modelName,
-          parentContext,
-        );
+        // Create child spans for main LLM calls
+        this.createLlmCallSpans(mainLlmCalls, result.events, parentContext);
+        // Create tool spans with internal LLM calls nested inside
         this.createToolCallSpans(
           result.toolCalls,
+          internalLlmCalls,
           parentContext,
-          debugInfo.internalCalls,
         );
 
-        // Return without the logFile property (it's internal)
-        const { logFile: _, ...publicResult } = result;
-        return publicResult;
+        return { ...result, llmCalls: enrichedLlmCalls };
       } catch (error) {
         span.setStatus({
           code: SpanStatusCode.ERROR,
@@ -264,24 +302,85 @@ export class AmpClient {
         throw error;
       } finally {
         span.end();
+        await this.proxy?.stop();
+        this.proxy = null;
       }
     });
+  }
+
+  /**
+   * Enrich LLM calls from stream-json with data from proxy captures.
+   * Also adds internal LLM calls that weren't visible in stream-json.
+   */
+  private enrichLlmCalls(
+    streamCalls: LlmCallInfo[],
+    capturedCalls: CapturedLlmCall[],
+  ): LlmCallInfo[] {
+    const result: LlmCallInfo[] = [];
+
+    // Match stream calls with captured calls by approximate timing
+    // The main agent calls go to /api/provider/anthropic/v1/messages
+    const mainCalls = capturedCalls.filter((c) =>
+      c.path.includes("/anthropic/"),
+    );
+    const internalCalls = capturedCalls.filter(
+      (c) => !c.path.includes("/anthropic/"),
+    );
+
+    // For main calls, merge with stream data to get full picture
+    for (let i = 0; i < streamCalls.length; i++) {
+      const streamCall = streamCalls[i];
+      // Find matching captured call by timing (within a reasonable window)
+      const matchedCapture = mainCalls.find(
+        (c) =>
+          Math.abs(c.startTime - streamCall.startTime) < 2000 &&
+          Math.abs(c.endTime - streamCall.endTime) < 2000,
+      );
+
+      result.push({
+        ...streamCall,
+        model: matchedCapture?.model ?? streamCall.model ?? "claude",
+        startTime: matchedCapture?.startTime ?? streamCall.startTime,
+        endTime: matchedCapture?.endTime ?? streamCall.endTime,
+        isInternal: false,
+      });
+    }
+
+    // Add internal calls (Oracle, Task, etc.) with real timing and data
+    for (const captured of internalCalls) {
+      result.push({
+        index: result.length,
+        model: captured.model,
+        stopReason: captured.stopReason ?? "unknown",
+        inputTokens: captured.usage?.inputTokens ?? 0,
+        outputTokens: captured.usage?.outputTokens ?? 0,
+        cacheCreationInputTokens: captured.usage?.cacheCreationTokens ?? 0,
+        cacheReadInputTokens: captured.usage?.cacheReadTokens ?? 0,
+        startTime: captured.startTime,
+        endTime: captured.endTime,
+        toolCalls: captured.toolCalls.map((t) => t.name),
+        isInternal: true,
+        providerPath: captured.path,
+        inputMessages: captured.messages,
+        outputContent: captured.content,
+      });
+    }
+
+    // Sort by start time
+    result.sort((a, b) => a.startTime - b.startTime);
+
+    return result;
   }
 
   private createLlmCallSpans(
     llmCalls: LlmCallInfo[],
     events: AmpEvent[],
-    modelName: string,
     parentContext: Context,
   ): void {
-    // Build conversation history incrementally for each LLM call
-    // Each call sees all messages up to that point
     const conversationMessages: Array<{
       role: string;
       content: AmpContentBlock[];
     }> = [];
-
-    // Track which assistant event corresponds to each LLM call
     let assistantEventIndex = 0;
     const assistantEvents = events.filter(
       (e): e is AmpAssistantEvent => e.type === "assistant",
@@ -290,11 +389,8 @@ export class AmpClient {
     for (let i = 0; i < llmCalls.length; i++) {
       const llm = llmCalls[i];
 
-      // Add all events that occurred before this LLM call to the conversation
-      // For the first call, we need user messages; for subsequent calls, we also include
-      // the previous assistant response and any tool results
-      if (i === 0) {
-        // First call: gather all user events that precede the first assistant response
+      // Build conversation history for non-internal calls
+      if (!llm.isInternal && i === 0) {
         for (const event of events) {
           if (event.type === "user") {
             conversationMessages.push({
@@ -302,57 +398,23 @@ export class AmpClient {
               content: event.message.content,
             });
           } else if (event.type === "assistant") {
-            break; // Stop at first assistant response
-          }
-        }
-      } else {
-        // Subsequent calls: add the previous assistant response and any tool results
-        const prevAssistant = assistantEvents[i - 1];
-        if (prevAssistant) {
-          conversationMessages.push({
-            role: "assistant",
-            content: prevAssistant.message.content,
-          });
-
-          // Find tool results that follow this assistant message
-          // Tool results appear as user events with tool_result content
-          for (const event of events) {
-            if (event.type === "user") {
-              const hasToolResults = event.message.content.some(
-                (block) => block.type === "tool_result",
-              );
-              if (hasToolResults) {
-                // Check if this tool result is for a tool_use in the previous assistant message
-                const toolUseIds = prevAssistant.message.content
-                  .filter((block) => block.type === "tool_use")
-                  .map((block) => (block as { id: string }).id);
-                const resultIds = event.message.content
-                  .filter((block) => block.type === "tool_result")
-                  .map(
-                    (block) => (block as { tool_use_id: string }).tool_use_id,
-                  );
-                if (resultIds.some((id) => toolUseIds.includes(id))) {
-                  conversationMessages.push({
-                    role: "user",
-                    content: event.message.content,
-                  });
-                }
-              }
-            }
+            break;
           }
         }
       }
 
-      const assistantEvent = assistantEvents[i];
+      const spanName = llm.isInternal
+        ? `chat ${llm.model} (internal)`
+        : `chat ${llm.model}`;
 
       const llmSpan = this.tracer.startSpan(
-        `chat ${modelName}`,
+        spanName,
         { startTime: llm.startTime },
         parentContext,
       );
       llmSpan.setAttribute("gen_ai.operation.name", "chat");
       llmSpan.setAttribute("gen_ai.step.index", llm.index);
-      llmSpan.setAttribute("gen_ai.request.model", modelName);
+      llmSpan.setAttribute("gen_ai.request.model", llm.model);
       llmSpan.setAttribute("gen_ai.usage.input_tokens", llm.inputTokens);
       llmSpan.setAttribute("gen_ai.usage.output_tokens", llm.outputTokens);
       llmSpan.setAttribute(
@@ -363,14 +425,17 @@ export class AmpClient {
         "gen_ai.usage.cache_creation_tokens",
         llm.cacheCreationInputTokens,
       );
+      llmSpan.setAttribute("gen_ai.internal", llm.isInternal);
 
-      // Map stop reason to gen_ai finish reason
+      if (llm.providerPath) {
+        llmSpan.setAttribute("gen_ai.provider_path", llm.providerPath);
+      }
+
       const finishReason =
         llm.stopReason === "tool_use" ? "tool-calls" : "stop";
       llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
 
-      // Add full conversation history as input
-      if (conversationMessages.length > 0) {
+      if (!llm.isInternal && conversationMessages.length > 0) {
         const input = JSON.stringify(conversationMessages);
         llmSpan.setAttribute(
           "gen_ai.input.messages",
@@ -378,13 +443,21 @@ export class AmpClient {
         );
       }
 
-      // Add completion content from the assistant event
-      if (assistantEvent) {
-        const completion = JSON.stringify(assistantEvent.message.content);
-        llmSpan.setAttribute(
-          "gen_ai.output.messages",
-          this.truncate(completion, 4000),
-        );
+      if (!llm.isInternal) {
+        const assistantEvent = assistantEvents[assistantEventIndex++];
+        if (assistantEvent) {
+          const completion = JSON.stringify(assistantEvent.message.content);
+          llmSpan.setAttribute(
+            "gen_ai.output.messages",
+            this.truncate(completion, 4000),
+          );
+
+          // Add assistant message to conversation for next iteration
+          conversationMessages.push({
+            role: "assistant",
+            content: assistantEvent.message.content,
+          });
+        }
       }
 
       llmSpan.setStatus({ code: SpanStatusCode.OK });
@@ -394,17 +467,9 @@ export class AmpClient {
 
   private createToolCallSpans(
     toolCalls: ToolCallInfo[],
+    internalLlmCalls: LlmCallInfo[],
     parentContext: Context,
-    internalCalls: InternalLlmCall[] = [],
   ): void {
-    // Group internal calls by their parent tool
-    const callsByTool = new Map<string, InternalLlmCall[]>();
-    for (const call of internalCalls) {
-      const existing = callsByTool.get(call.toolName) ?? [];
-      existing.push(call);
-      callsByTool.set(call.toolName, existing);
-    }
-
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(
         `execute_tool ${tool.name}`,
@@ -414,15 +479,21 @@ export class AmpClient {
 
       toolSpan.setAttribute("gen_ai.operation.name", "execute_tool");
       toolSpan.setAttribute("gen_ai.tool.name", tool.name);
+      const argsValue = this.isPlainObject(tool.input)
+        ? tool.input
+        : { arguments: tool.input };
       toolSpan.setAttribute(
         "gen_ai.tool.arguments",
-        JSON.stringify(tool.input).slice(0, 4000),
+        JSON.stringify(argsValue).slice(0, 4000),
       );
 
       if (tool.result !== undefined) {
+        const resultValue = this.isPlainObject(tool.result)
+          ? tool.result
+          : { content: this.truncate(tool.result, 4000) };
         toolSpan.setAttribute(
-          "gen_ai.tool.message",
-          this.truncate(tool.result, 4000),
+          "gen_ai.tool.call.result",
+          JSON.stringify(resultValue),
         );
       }
 
@@ -432,95 +503,101 @@ export class AmpClient {
         toolSpan.setStatus({ code: SpanStatusCode.OK });
       }
 
-      // Create internal LLM call spans as children of this tool span
-      const toolNameLower = tool.name.toLowerCase();
-      const internalForTool = callsByTool.get(toolNameLower);
-      if (internalForTool && internalForTool.length > 0) {
+      // Find internal LLM calls that happened during this tool's execution
+      // Use overlapping time ranges with a small tolerance (100ms) since proxy timestamps
+      // may slightly precede stream-json timestamps
+      const toolEnd = tool.endTime ?? Date.now();
+      const tolerance = 100;
+      const childLlmCalls = internalLlmCalls.filter(
+        (llm) =>
+          llm.startTime >= tool.startTime - tolerance &&
+          llm.endTime <= toolEnd + tolerance,
+      );
+
+      // Create child LLM spans under this tool span
+      if (childLlmCalls.length > 0) {
         const toolContext = trace.setSpan(parentContext, toolSpan);
-        this.createInternalLlmSpansForTool(internalForTool, tool, toolContext);
+        for (const llm of childLlmCalls) {
+          this.createInternalLlmSpan(llm, toolContext);
+        }
       }
 
-      toolSpan.end(tool.endTime ?? Date.now());
+      toolSpan.end(toolEnd);
     }
   }
 
-  private createInternalLlmSpansForTool(
-    internalCalls: InternalLlmCall[],
-    tool: ToolCallInfo,
-    toolContext: Context,
+  private createInternalLlmSpan(
+    llm: LlmCallInfo,
+    parentContext: Context,
   ): void {
-    const toolStart = tool.startTime;
-    const toolEnd = tool.endTime ?? Date.now();
-    const toolDuration = toolEnd - toolStart;
+    const llmSpan = this.tracer.startSpan(
+      `chat ${llm.model}`,
+      { startTime: llm.startTime },
+      parentContext,
+    );
 
-    // Space calls evenly, leaving some margin at start and end
-    const margin = toolDuration * 0.1;
-    const availableDuration = toolDuration - 2 * margin;
-    const callDuration = availableDuration / internalCalls.length;
+    llmSpan.setAttribute("gen_ai.operation.name", "chat");
+    llmSpan.setAttribute("gen_ai.request.model", llm.model);
+    llmSpan.setAttribute("gen_ai.usage.input_tokens", llm.inputTokens);
+    llmSpan.setAttribute("gen_ai.usage.output_tokens", llm.outputTokens);
+    llmSpan.setAttribute(
+      "gen_ai.usage.cache_read_tokens",
+      llm.cacheReadInputTokens,
+    );
+    llmSpan.setAttribute(
+      "gen_ai.usage.cache_creation_tokens",
+      llm.cacheCreationInputTokens,
+    );
+    llmSpan.setAttribute("gen_ai.internal", true);
 
-    for (let i = 0; i < internalCalls.length; i++) {
-      const call = internalCalls[i];
-      const fakeStartTime = toolStart + margin + i * callDuration;
-      const fakeEndTime = fakeStartTime + callDuration * 0.9;
-
-      const internalSpan = this.tracer.startSpan(
-        `chat ${call.model}`,
-        { startTime: fakeStartTime },
-        toolContext,
-      );
-
-      internalSpan.setAttribute("gen_ai.operation.name", "chat");
-      internalSpan.setAttribute("gen_ai.request.model", call.model);
-      internalSpan.setAttribute("gen_ai.provider.name", call.toolName);
-      internalSpan.setAttribute("gen_ai.internal", true);
-
-      if (call.task) {
-        internalSpan.setAttribute(
-          "gen_ai.input.messages",
-          this.truncate(call.task, 4000),
-        );
-      }
-      if (call.reasoningEffort) {
-        internalSpan.setAttribute(
-          "gen_ai.reasoning_effort",
-          call.reasoningEffort,
-        );
-      }
-      if (call.messageCount !== undefined) {
-        internalSpan.setAttribute("gen_ai.message_count", call.messageCount);
-      }
-      if (call.toolCount !== undefined) {
-        internalSpan.setAttribute("gen_ai.available_tools", call.toolCount);
-      }
-      if (call.toolCallCount !== undefined) {
-        internalSpan.setAttribute("gen_ai.tool_calls_made", call.toolCallCount);
-      }
-
-      internalSpan.setStatus({ code: SpanStatusCode.OK });
-      internalSpan.end(fakeEndTime);
+    if (llm.providerPath) {
+      llmSpan.setAttribute("gen_ai.provider_path", llm.providerPath);
     }
+
+    const finishReason = llm.stopReason === "tool_use" ? "tool-calls" : "stop";
+    llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
+
+    if (llm.toolCalls.length > 0) {
+      llmSpan.setAttribute("gen_ai.tool_calls", llm.toolCalls.join(", "));
+    }
+
+    // Add input/output messages captured from proxy
+    if (llm.inputMessages) {
+      llmSpan.setAttribute(
+        "gen_ai.input.messages",
+        this.truncate(JSON.stringify(llm.inputMessages), 8000),
+      );
+    }
+    if (llm.outputContent) {
+      llmSpan.setAttribute(
+        "gen_ai.output.messages",
+        this.truncate(JSON.stringify(llm.outputContent), 8000),
+      );
+    }
+
+    llmSpan.setStatus({ code: SpanStatusCode.OK });
+    llmSpan.end(llm.endTime);
   }
 
   private spawnAmp(
     prompt: string,
     options: AmpInvokeOptions,
-    parentSpan: Span,
-  ): Promise<SpawnAmpResult> {
+    proxyPort: number,
+    caCertPath: string,
+  ): Promise<AmpResult> {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
-      const logFile = join(tmpdir(), `amp-debug-${randomUUID()}.log`);
-      const args = [
-        "-x",
-        "--stream-json",
-        "--log-level",
-        "debug",
-        "--log-file",
-        logFile,
-      ];
+      const args = ["-x", "--stream-json"];
 
       const proc: ChildProcess = spawn("amp", args, {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env: {
+          ...process.env,
+          ...options.env,
+          // Route traffic through our proxy
+          HTTPS_PROXY: `http://127.0.0.1:${proxyPort}`,
+          NODE_EXTRA_CA_CERTS: caCertPath,
+        },
         stdio: ["pipe", "pipe", "pipe"],
       });
 
@@ -561,15 +638,12 @@ export class AmpClient {
 
           if (event.type === "system" && event.subtype === "init") {
             sessionId = event.session_id;
-            // LLM call starts after system init
             llmCallStartTime = Date.now();
           }
 
           if (event.type === "user") {
-            // User message (prompt or tool result) starts an LLM call
             llmCallStartTime = Date.now();
 
-            // Match tool results to pending tool calls
             for (const block of event.message.content) {
               if (block.type === "tool_result") {
                 const pending = pendingToolCalls.get(block.tool_use_id);
@@ -588,13 +662,11 @@ export class AmpClient {
             const now = Date.now();
             const u = event.message.usage;
 
-            // Accumulate total usage
             usage.inputTokens += u.input_tokens;
             usage.outputTokens += u.output_tokens;
             usage.cacheCreationInputTokens += u.cache_creation_input_tokens;
             usage.cacheReadInputTokens += u.cache_read_input_tokens;
 
-            // Collect tool call names from this response
             const toolCallNames: string[] = [];
             for (const block of event.message.content) {
               if (block.type === "tool_use") {
@@ -609,9 +681,9 @@ export class AmpClient {
               }
             }
 
-            // Record LLM call
             llmCalls.push({
               index: llmCallIndex++,
+              model: "claude", // Will be enriched by proxy data
               stopReason: event.message.stop_reason,
               inputTokens: u.input_tokens,
               outputTokens: u.output_tokens,
@@ -620,6 +692,7 @@ export class AmpClient {
               startTime: llmCallStartTime ?? startTime,
               endTime: now,
               toolCalls: toolCallNames,
+              isInternal: false,
             });
           }
 
@@ -636,7 +709,6 @@ export class AmpClient {
         stdout += text;
         options.onStdout?.(text);
 
-        // Parse JSON lines
         lineBuffer += text;
         const lines = lineBuffer.split("\n");
         lineBuffer = lines.pop() ?? "";
@@ -659,12 +731,10 @@ export class AmpClient {
       proc.on("close", (code) => {
         if (timeout) clearTimeout(timeout);
 
-        // Process any remaining buffer
         if (lineBuffer.trim()) {
           processLine(lineBuffer);
         }
 
-        // Close any pending tool calls that didn't get results
         for (const pending of pendingToolCalls.values()) {
           pending.endTime = Date.now();
           toolCalls.push(pending);
@@ -681,11 +751,9 @@ export class AmpClient {
           llmCalls,
           usage,
           finalResult,
-          logFile,
         });
       });
 
-      // Send prompt to stdin
       proc.stdin?.write(prompt);
       proc.stdin?.end();
     });
@@ -696,101 +764,15 @@ export class AmpClient {
     return str.slice(0, maxLength) + "... [truncated]";
   }
 
-  /**
-   * BAD HACK: Parse debug log file to extract internal LLM calls from tools like Oracle.
-   *
-   * This is necessary because Amp's --stream-json doesn't expose internal LLM calls
-   * made by subagents (Oracle, Task, Librarian, etc.). We scrape the debug log file
-   * to get partial visibility into these calls.
-   *
-   * Limitations:
-   * - No precise timing (we fake it by spacing calls evenly within parent tool span)
-   * - No token counts
-   * - No prompt/completion content
-   * - Fragile: depends on log format which may change
-   */
-  private async BAD_HACK__parseDebugLog(
-    logFile: string,
-  ): Promise<DebugLogInfo> {
-    const result: DebugLogInfo = {
-      mainModel: null,
-      internalCalls: [],
-    };
-
-    try {
-      const content = await readFile(logFile, "utf-8");
-      const lines = content.split("\n").filter(Boolean);
-
-      let currentToolName = "unknown";
-
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line);
-
-          // Extract the main model from inference start
-          if (
-            entry.message ===
-              "runInferenceAndUpdateThread: starting inference" &&
-            entry.selectedModel
-          ) {
-            // selectedModel is like "anthropic/claude-opus-4-5-20251101"
-            result.mainModel = entry.selectedModel.replace("anthropic/", "");
-          }
-
-          // Track which tool is being invoked
-          if (entry.message === "Oracle starting consultation:") {
-            currentToolName = "oracle";
-            result.internalCalls.push({
-              model: entry.model ?? "gpt-5.2",
-              toolName: currentToolName,
-              task: entry.task,
-              reasoningEffort: entry.reasoningEffort,
-            });
-          }
-
-          // OpenAI scaffold requests (Oracle uses this)
-          if (entry.message === "OpenAI scaffold making request:") {
-            // Update the last call with additional info
-            const lastCall =
-              result.internalCalls[result.internalCalls.length - 1];
-            if (lastCall && lastCall.toolName === currentToolName) {
-              lastCall.messageCount = entry.messageCount;
-              lastCall.toolCount = entry.toolCount;
-            }
-          }
-
-          // OpenAI scaffold completion
-          if (entry.message === "OpenAI scaffold completed:") {
-            const lastCall =
-              result.internalCalls[result.internalCalls.length - 1];
-            if (lastCall && lastCall.toolName === currentToolName) {
-              lastCall.toolCallCount = entry.toolCallCount;
-            }
-          }
-
-          // Could add more patterns here for Task, Librarian, finder, etc.
-        } catch {
-          // Not valid JSON, skip
-        }
-      }
-    } catch (error) {
-      // Log file doesn't exist or can't be read - that's fine
-    }
-
-    // Clean up the log file
-    try {
-      await unlink(logFile);
-    } catch {
-      // Ignore cleanup errors
-    }
-
-    return result;
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      !Array.isArray(value)
+    );
   }
 }
 
-/**
- * Convenience function to create an instrumented Amp client
- */
 export function createAmpClient(): AmpClient {
   return new AmpClient();
 }
