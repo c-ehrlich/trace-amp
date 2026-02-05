@@ -3,7 +3,7 @@ import { readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { Span, SpanStatusCode, context, trace } from '@opentelemetry/api';
+import { Span, SpanStatusCode, context, trace, Context } from '@opentelemetry/api';
 import { getTracer } from './tracing.js';
 
 export interface AmpInvokeOptions {
@@ -194,12 +194,15 @@ export class AmpClient {
         const debugInfo = await this.BAD_HACK__parseDebugLog(result.logFile);
         const modelName = debugInfo.mainModel ?? 'claude';
 
+        // Capture the active context while we're inside startActiveSpan
+        const parentContext = context.active();
+
         // Create child spans for each LLM call and tool call
-        this.createLlmCallSpans(result.llmCalls, result.events, modelName, span);
-        this.createToolCallSpans(result.toolCalls, span);
+        this.createLlmCallSpans(result.llmCalls, result.events, modelName, parentContext);
+        this.createToolCallSpans(result.toolCalls, parentContext);
 
         if (debugInfo.internalCalls.length > 0) {
-          this.BAD_HACK__createInternalLlmCallSpans(debugInfo.internalCalls, result.toolCalls, span);
+          this.BAD_HACK__createInternalLlmCallSpans(debugInfo.internalCalls, result.toolCalls, parentContext);
         }
 
         // Return without the logFile property (it's internal)
@@ -218,8 +221,7 @@ export class AmpClient {
     });
   }
 
-  private createLlmCallSpans(llmCalls: LlmCallInfo[], events: AmpEvent[], modelName: string, parentSpan: Span): void {
-    const parentContext = trace.setSpan(context.active(), parentSpan);
+  private createLlmCallSpans(llmCalls: LlmCallInfo[], events: AmpEvent[], modelName: string, parentContext: Context): void {
 
     // Extract assistant events to get prompts and completions
     const assistantEvents = events.filter((e): e is AmpAssistantEvent => e.type === 'assistant');
@@ -255,9 +257,7 @@ export class AmpClient {
     }
   }
 
-  private createToolCallSpans(toolCalls: ToolCallInfo[], parentSpan: Span): void {
-    const parentContext = trace.setSpan(context.active(), parentSpan);
-
+  private createToolCallSpans(toolCalls: ToolCallInfo[], parentContext: Context): void {
     for (const tool of toolCalls) {
       const toolSpan = this.tracer.startSpan(
         `execute_tool ${tool.name}`,
@@ -565,9 +565,8 @@ export class AmpClient {
   private BAD_HACK__createInternalLlmCallSpans(
     internalCalls: InternalLlmCall[],
     toolCalls: ToolCallInfo[],
-    parentSpan: Span
+    parentContext: Context
   ): void {
-    const parentContext = trace.setSpan(context.active(), parentSpan);
 
     // Group internal calls by their parent tool
     const callsByTool = new Map<string, InternalLlmCall[]>();
