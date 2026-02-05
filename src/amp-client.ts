@@ -279,13 +279,17 @@ export class AmpClient {
     modelName: string,
     parentContext: Context,
   ): void {
-    // Extract assistant events to get prompts and completions
+    // Extract user and assistant events to get prompts and completions
+    const userEvents = events.filter(
+      (e): e is AmpUserEvent => e.type === "user",
+    );
     const assistantEvents = events.filter(
       (e): e is AmpAssistantEvent => e.type === "assistant",
     );
 
     for (let i = 0; i < llmCalls.length; i++) {
       const llm = llmCalls[i];
+      const userEvent = userEvents[i];
       const assistantEvent = assistantEvents[i];
 
       const llmSpan = this.tracer.startSpan(
@@ -311,6 +315,15 @@ export class AmpClient {
       const finishReason =
         llm.stopReason === "tool_use" ? "tool-calls" : "stop";
       llmSpan.setAttribute("gen_ai.response.finish_reasons", finishReason);
+
+      // Add input content from the user event
+      if (userEvent) {
+        const input = JSON.stringify(userEvent.message.content);
+        llmSpan.setAttribute(
+          "gen_ai.input.messages",
+          this.truncate(input, 4000),
+        );
+      }
 
       // Add completion content from the assistant event
       if (assistantEvent) {
